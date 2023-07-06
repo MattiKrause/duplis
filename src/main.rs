@@ -1,16 +1,34 @@
-use std::alloc::Layout;
+mod set_order;
+mod set_consumer;
+
+
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsString};
 use std::hash::Hasher;
-use std::io::{BufReader};
-use std::mem::{ManuallyDrop, MaybeUninit, size_of_val};
+
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
-use bumpalo::Bump;
+use std::time::{SystemTime};
+
+
+
+use crate::set_consumer::{DryRun, EqualFileSetConsumer};
+use crate::set_order::{NoopSetOrder, SetOrder};
 
 #[derive(Clone, Debug)]
 struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
+
+enum HashFileError {
+    IO(std::io::Error),
+    FileChanged,
+}
+
+impl From<std::io::Error> for HashFileError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IO(value)
+    }
+}
 
 impl LinkedPath {
     fn push_full_to_buf(&self, buf: &mut PathBuf) {
@@ -27,90 +45,66 @@ impl LinkedPath {
     }
 }
 
-struct HashedFile {
-    file_version_timestamp: Option<SystemTime>, file_path: LinkedPath
+pub struct HashedFile {
+    file_version_timestamp: Option<SystemTime>,
+    file_path: LinkedPath,
 }
 
-fn main()  {
+fn main() {
     // shared-imm-state: Regex etc.
     // work queue: 1 Thread -> one working thread
     // single ui responsive
 
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
 
+    let (files_send, files_rev) = flume::unbounded();
+    produce_list(OsString::from("."), false, |file| {
+        files_send.send(file).expect("sink leads to nowhere; this should not happen")
+    });
+    drop(files_send);
 
-    let find_files_time = Instant::now();
-    let mut files= Vec::new();
-    produce_list(true, |name| files.push(name));
-    let find_files_time = find_files_time.elapsed();
-    println!("found files: {find_files_time:?}");
 
     let mut path_buf = PathBuf::new();
     let mut target = HashMap::new();
 
-    let hash_files_time = Instant::now();
-    for file_path in files {
+    for file_path in files_rev.into_iter() {
         path_buf.clear();
         file_path.push_full_to_buf(&mut path_buf);
-        let file = std::fs::OpenOptions::new().read(true).write(false).open(&path_buf);
-        let Ok(mut file) = file else { continue };
-        let Ok(metadata) = file.metadata() else { continue };
-        let before_mod_time = metadata.modified().ok();// might be unavailable on the platform
-        let Ok(hash_value) = hash_file(&mut file) else { continue };
-        let Ok(metadata) = file.metadata() else { continue };
-        let after_mod_time = metadata.modified().ok();
 
-        if before_mod_time == after_mod_time {
-            target.entry(hash_value).or_insert(Vec::new()).push((after_mod_time, file_path));
-        } else {
-            //TODO log
-        }
-    }
-    let hash_files_time = hash_files_time.elapsed();
-
-    let delete_files_time = Instant::now();
-    let mut sort_buf = Vec::new();
-    for set in target.into_values() {
-        if set.len() <= 1 {
-            continue;
-        }
-        sort_buf.clear();
-
-        let mut path_buf = PathBuf::new();
-        for (last_modified, file_name) in set {
-            path_buf.clear();
-            file_name.push_full_to_buf(&mut path_buf);
-            let Ok(file) = std::fs::OpenOptions::new().read(true).write(false).open(&path_buf) else { continue };
-            let Ok(metadata) = file.metadata() else { continue };
-            if metadata.modified().ok() != last_modified {
-                continue;
+        match hash_file(&path_buf) {
+            Ok(hash) => {
+                target.entry(hash.0)
+                    .or_insert(Vec::new())
+                    .push(HashedFile { file_version_timestamp: hash.1, file_path });
             }
-            let metadata = metadata.created().ok().unwrap();
-            sort_buf.push((metadata, file_name))
-        }
-
-        sort_buf.sort_by_key(|(time, _)| *time);
-        for (_, name) in &sort_buf[1..] {
-            path_buf.clear();
-            name.push_full_to_buf(&mut path_buf);
-            println!("deleting {}", path_buf.display());
+            Err(HashFileError::FileChanged) => log::warn!("file {} changed during hashing; ignoring file", path_buf.display()),
+            Err(HashFileError::IO(err)) => match err.kind() {
+                std::io::ErrorKind::PermissionDenied => log::warn!("no permission to access {}; ignoring file", path_buf.display()),
+                std::io::ErrorKind::NotFound => {}
+                _ => log::warn!("failed to access file {} due to {err}; ignoring file", path_buf.display())
+            }
         }
     }
-    let delete_files_time = delete_files_time.elapsed();
-    println!("finding files: {:?}, hashing files: {:?}, deleting_files: {:?}", find_files_time, hash_files_time, delete_files_time)
+    let mut set_sort = NoopSetOrder;
+    let mut set_consumer = DryRun::new();
+
+    for mut set in target.into_iter().filter(|(_, set)| set.len() > 1) {
+        set_sort.order(&mut set.1).unwrap();
+        set_consumer.consume_set(set.1);
+    }
 }
 
-fn produce_list(recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
-    let mut dir_list = vec![Arc::new(LinkedPath(None, OsString::from(".")))];
+fn produce_list(directory: OsString, recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
+    let mut dir_list = vec![Arc::new(LinkedPath(None, directory))];
 
     let mut path_acc = PathBuf::new();
     while let Some(dir) = dir_list.pop() {
         path_acc.clear();
         dir.push_full_to_buf(&mut path_acc);
-        let Ok(current_dir) = std::fs::read_dir(&path_acc) else { continue };
+        let Ok(current_dir) = std::fs::read_dir(&path_acc) else { continue; };
         for entry in current_dir {
-            let Ok(entry) = entry else { break };
-            let Ok(file_type) = entry.file_type() else { continue };
+            let Ok(entry) = entry else { break; };
+            let Ok(file_type) = entry.file_type() else { continue; };
             if file_type.is_file() {
                 write_target(LinkedPath(Some(dir.clone()), entry.file_name()));
             } else if file_type.is_dir() && recursive {
@@ -120,7 +114,22 @@ fn produce_list(recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
     }
 }
 
-fn hash_file(mut file: impl std::io::Read) -> std::io::Result<u128> {
+fn hash_file(path: impl AsRef<Path>) -> Result<(u128, Option<SystemTime>), HashFileError> {
+    let mut file = std::fs::OpenOptions::new().read(true).write(false).open(path.as_ref())?;
+    let metadata = file.metadata()?;
+    let before_mod_time = metadata.modified().ok();// might be unavailable on the platform
+    let hash_value = hash_source(&mut file)?;
+    let metadata = file.metadata()?;
+    let after_mod_time = metadata.modified().ok();
+
+    if before_mod_time == after_mod_time {
+        Ok((hash_value, before_mod_time))
+    } else {
+        Err(HashFileError::FileChanged)
+    }
+}
+
+fn hash_source(mut file: impl std::io::Read) -> std::io::Result<u128> {
     let mut buf = Box::new([0; 256]);
     let mut hash = xxhash_rust::xxh3::Xxh3::default();
     while let Some(bytes_read) = Some(file.read(buf.as_mut_slice())?).filter(|amount| *amount != 0) {
