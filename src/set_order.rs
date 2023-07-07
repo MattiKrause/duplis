@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
-use crate::HashedFile;
-
-pub type BoxErr = Box<dyn std::error::Error>;
+use crate::{BoxErr, HashedFile};
 
 pub trait SetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr>;

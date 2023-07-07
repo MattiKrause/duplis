@@ -1,5 +1,7 @@
 mod set_order;
 mod set_consumer;
+#[cfg(unix)]
+mod unix_specific;
 
 
 use std::collections::HashMap;
@@ -12,9 +14,12 @@ use std::sync::Arc;
 use std::time::{SystemTime};
 
 
+use crate::set_consumer::{FileSetConsumer, InteractiveEachChoice, ReplaceWithHardLinkFileAction};
+use crate::set_order::{ModTimeSetOrder, SetOrder};
 
-use crate::set_consumer::{DryRun, EqualFileSetConsumer};
-use crate::set_order::{NoopSetOrder, SetOrder};
+pub enum Recoverable<R, F> {
+    Recoverable(R), Fatal(F)
+}
 
 #[derive(Clone, Debug)]
 struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
@@ -45,10 +50,13 @@ impl LinkedPath {
     }
 }
 
+#[derive(Debug)]
 pub struct HashedFile {
     file_version_timestamp: Option<SystemTime>,
     file_path: LinkedPath,
 }
+
+pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
     // shared-imm-state: Regex etc.
@@ -58,7 +66,7 @@ fn main() {
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
 
     let (files_send, files_rev) = flume::unbounded();
-    produce_list(OsString::from("."), false, |file| {
+    produce_list(OsString::from("."), true, |file| {
         files_send.send(file).expect("sink leads to nowhere; this should not happen")
     });
     drop(files_send);
@@ -85,12 +93,15 @@ fn main() {
             }
         }
     }
-    let mut set_sort = NoopSetOrder;
-    let mut set_consumer = DryRun::new();
+    let mut set_sort = ModTimeSetOrder::new();
+    let mut set_consumer = InteractiveEachChoice::for_console(Box::new(ReplaceWithHardLinkFileAction));
 
-    for mut set in target.into_iter().filter(|(_, set)| set.len() > 1) {
+    for mut set in target.into_iter(){
         set_sort.order(&mut set.1).unwrap();
-        set_consumer.consume_set(set.1);
+
+        if let Err(_) = set_consumer.consume_set(set.1) {
+            break
+        };
     }
 }
 
