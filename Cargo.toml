@@ -11,3 +11,4 @@ xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
 log = "0.4.19"
 env_logger = "0.10.0"
 flume = "0.10.14"
+clap = { version = "4.3.3", features = ["string"] }

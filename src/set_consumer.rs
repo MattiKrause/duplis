@@ -48,9 +48,14 @@ pub struct DryRun<W> {
 }
 
 #[derive(Default)]
-pub struct DebugFileAction;
-pub struct DeleteFileAction;
-pub struct ReplaceWithHardLinkFileAction;
+pub struct NoopFileAction;
+#[derive(Default)]
+pub struct DebugFileAction { _p: () }
+#[derive(Default)]
+pub struct DeleteFileAction { _p: () }
+#[derive(Default)]
+pub struct ReplaceWithHardLinkFileAction { _p: () }
+
 
 impl Default for DryRun<std::io::Stdout> {
     fn default() -> Self {
@@ -191,6 +196,12 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 };
             }
         }
+        Ok(())
+    }
+}
+
+impl FileSetConsumer for NoopFileAction {
+    fn consume_set(&mut self, _set: Vec<HashedFile>) -> Result<(), BoxErr> {
         Ok(())
     }
 }

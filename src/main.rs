@@ -1,7 +1,7 @@
 mod set_order;
 mod set_consumer;
-#[cfg(unix)]
-mod unix_specific;
+mod parse_cli;
+mod os;
 
 
 use std::collections::HashMap;
@@ -14,15 +14,14 @@ use std::sync::Arc;
 use std::time::{SystemTime};
 
 
-use crate::set_consumer::{FileSetConsumer, InteractiveEachChoice, ReplaceWithHardLinkFileAction};
-use crate::set_order::{ModTimeSetOrder, SetOrder};
+use crate::parse_cli::ExecutionPlan;
 
 pub enum Recoverable<R, F> {
     Recoverable(R), Fatal(F)
 }
 
 #[derive(Clone, Debug)]
-struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
+pub struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
 
 enum HashFileError {
     IO(std::io::Error),
@@ -48,9 +47,19 @@ impl LinkedPath {
         self.push_full_to_buf(&mut path_buf);
         path_buf
     }
+
+    fn from_path_buf(buf: &PathBuf) -> Arc<Self>  {
+        buf.iter().map(ToOwned::to_owned)
+            .fold(None, |acc, res| Some(Arc::new(LinkedPath(acc, res))))
+            .expect("empty path")
+    }
+
+    fn root(dir: &str) -> Arc<Self> {
+        Arc::new(Self(None, OsString::from(dir)))
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HashedFile {
     file_version_timestamp: Option<SystemTime>,
     file_path: LinkedPath,
@@ -63,12 +72,18 @@ fn main() {
     // work queue: 1 Thread -> one working thread
     // single ui responsive
 
+    env_logger::builder().init();
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
+    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks: _, mut order_set, action: mut file_set_action } = parse_cli::parse().unwrap();
 
     let (files_send, files_rev) = flume::unbounded();
-    produce_list(OsString::from("."), true, |file| {
-        files_send.send(file).expect("sink leads to nowhere; this should not happen")
-    });
+
+    for (dir, rec) in dirs.into_iter().map(|d| (d, false)).chain(recursive_dirs.into_iter().map(|d| (d, true))) {
+        produce_list(dir, rec, |file| {
+            files_send.send(file).expect("sink leads to nowhere; this should not happen")
+        });
+    }
+
     drop(files_send);
 
 
@@ -93,20 +108,23 @@ fn main() {
             }
         }
     }
-    let mut set_sort = ModTimeSetOrder::new();
-    let mut set_consumer = InteractiveEachChoice::for_console(Box::new(ReplaceWithHardLinkFileAction));
 
     for mut set in target.into_iter(){
-        set_sort.order(&mut set.1).unwrap();
+        if set.1.len() <= 1 {
+            continue;
+        }
+        for order in &mut order_set {
+            order.order(&mut set.1).unwrap();
+        }
 
-        if let Err(_) = set_consumer.consume_set(set.1) {
+        if let Err(_) = file_set_action.consume_set(set.1) {
             break
         };
     }
 }
 
-fn produce_list(directory: OsString, recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
-    let mut dir_list = vec![Arc::new(LinkedPath(None, directory))];
+fn produce_list(path: Arc<LinkedPath>, recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
+    let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
     while let Some(dir) = dir_list.pop() {

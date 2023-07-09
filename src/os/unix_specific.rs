@@ -1,7 +1,23 @@
 use std::borrow::Cow;
 use std::path::Path;
+use crate::os::{SetOrderOption, SimpleFileConsumeActionArg};
 use crate::Recoverable;
 use crate::set_consumer::{FileConsumeAction, FileConsumeResult};
+
+pub fn get_set_order_options() -> Vec<SetOrderOption> {
+    vec![]
+}
+
+pub fn get_file_consume_action_simple() -> Vec<SimpleFileConsumeActionArg> {
+    let rsymlink = SimpleFileConsumeActionArg {
+        name: "resl",
+        short: 'L',
+        long: "resymlink",
+        help: String::from("replace duplicate files with a symlink"),
+        action: Box::new(ReplaceWithSymlinkFileAction),
+    };
+    vec![rsymlink]
+}
 
 pub struct ReplaceWithSymlinkFileAction;
 

@@ -2,31 +2,41 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use crate::{BoxErr, HashedFile};
 
-pub trait SetOrder {
+pub trait SetOrder{
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr>;
+    fn boxed_dyn_clone(&self) -> Box<dyn SetOrder>;
 }
 
 macro_rules! impl_new_rev {
     ($t: ident, $this: ident, $r: expr) => {
         impl $t {
-            pub fn new() -> Self {
+            pub fn new(reverse: bool) -> Self {
                 let mut $this = Self::default();
-                $r.reverse = true;
+                $r.reverse = reverse;
                 $this
             }
         }
     };
 }
 
+macro_rules! boxed_dyn_clone_impl {
+    () =>{
+        fn boxed_dyn_clone(&self) -> Box<dyn SetOrder> {
+            Box::new(self.clone())
+        }
+    };
+}
+
+#[derive(Clone)]
 pub struct MetadataSetOrder<F> { path_buf: PathBuf, file_buf: Vec<(F, HashedFile)>, reverse: bool }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NoopSetOrder;
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ModTimeSetOrder(MetadataSetOrder<SystemTime>);
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CreateTimeSetOrder(MetadataSetOrder<SystemTime>);
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NameAlphabeticSetOrder { sort_buf: Vec<(HashedFile, PathBuf)>, unused_buf: Vec<PathBuf>, reverse: bool }
 
 impl NoopSetOrder {
@@ -37,6 +47,8 @@ impl SetOrder for NoopSetOrder {
     fn order(&mut self, _files: &mut Vec<HashedFile>) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
+
+    boxed_dyn_clone_impl!{}
 }
 
 impl <T> Default for MetadataSetOrder<T> {
@@ -68,7 +80,7 @@ impl <F: Ord> MetadataSetOrder<F> {
             let key = key_extract(metadata)?;
             self.file_buf.push((key, file_data))
         }
-        self.file_buf.sort_unstable_by(|(key1, _), (key2, _)| {
+        self.file_buf.sort_by(|(key1, _), (key2, _)| {
             let ordering = key1.cmp(key2);
             if self.reverse { ordering.reverse() } else { ordering }
         });
@@ -83,6 +95,7 @@ impl SetOrder for ModTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
         self.0.order(files, |md| md.modified().map_err(|err| BoxErr::from(format!("cannot access modification time on current platform: {err}"))))
     }
+    boxed_dyn_clone_impl!{}
 }
 impl_new_rev!(CreateTimeSetOrder, this, this.0);
 
@@ -90,6 +103,7 @@ impl SetOrder for CreateTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
         self.0.order(files, |md| md.created().map_err(|err| format!("cannot access modification time on current platform: {err}").into()))
     }
+    boxed_dyn_clone_impl!{}
 }
 
 impl_new_rev!(NameAlphabeticSetOrder, this, this);
@@ -109,7 +123,7 @@ impl SetOrder for NameAlphabeticSetOrder {
             });
 
         self.sort_buf.extend(files_with_names);
-        self.sort_buf.sort_unstable_by(|(_, name1), (_, name2)| {
+        self.sort_buf.sort_by(|(_, name1), (_, name2)| {
             let order = name1.cmp(name2);
             if self.reverse { order.reverse() } else { order }
         });
@@ -120,4 +134,5 @@ impl SetOrder for NameAlphabeticSetOrder {
         }
         Ok(())
     }
+    boxed_dyn_clone_impl!{}
 }
