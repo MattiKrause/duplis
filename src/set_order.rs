@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 use crate::{BoxErr, HashedFile};
+use crate::util::DynCloneSetOrder;
 
-pub trait SetOrder{
+pub trait SetOrder: DynCloneSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr>;
-    fn boxed_dyn_clone(&self) -> Box<dyn SetOrder>;
 }
 
 macro_rules! impl_new_rev {
@@ -15,14 +15,6 @@ macro_rules! impl_new_rev {
                 $r.reverse = reverse;
                 $this
             }
-        }
-    };
-}
-
-macro_rules! boxed_dyn_clone_impl {
-    () =>{
-        fn boxed_dyn_clone(&self) -> Box<dyn SetOrder> {
-            Box::new(self.clone())
         }
     };
 }
@@ -47,8 +39,6 @@ impl SetOrder for NoopSetOrder {
     fn order(&mut self, _files: &mut Vec<HashedFile>) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
-
-    boxed_dyn_clone_impl!{}
 }
 
 impl <T> Default for MetadataSetOrder<T> {
@@ -95,7 +85,6 @@ impl SetOrder for ModTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
         self.0.order(files, |md| md.modified().map_err(|err| BoxErr::from(format!("cannot access modification time on current platform: {err}"))))
     }
-    boxed_dyn_clone_impl!{}
 }
 impl_new_rev!(CreateTimeSetOrder, this, this.0);
 
@@ -103,7 +92,6 @@ impl SetOrder for CreateTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
         self.0.order(files, |md| md.created().map_err(|err| format!("cannot access modification time on current platform: {err}").into()))
     }
-    boxed_dyn_clone_impl!{}
 }
 
 impl_new_rev!(NameAlphabeticSetOrder, this, this);
@@ -134,5 +122,4 @@ impl SetOrder for NameAlphabeticSetOrder {
         }
         Ok(())
     }
-    boxed_dyn_clone_impl!{}
 }

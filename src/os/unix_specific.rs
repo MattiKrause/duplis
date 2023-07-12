@@ -1,6 +1,9 @@
 use std::borrow::Cow;
-use std::path::Path;
-use crate::os::{SetOrderOption, SimpleFileConsumeActionArg};
+use std::hash::Hasher;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
+use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::Recoverable;
 use crate::set_consumer::{FileConsumeAction, FileConsumeResult};
 
@@ -17,6 +20,18 @@ pub fn get_file_consume_action_simple() -> Vec<SimpleFileConsumeActionArg> {
         action: Box::new(ReplaceWithSymlinkFileAction),
     };
     vec![rsymlink]
+}
+
+pub fn get_file_equals_arg_simple() -> Vec<SimpleFieEqualCheckerArg> {
+    let perm_eq = SimpleFieEqualCheckerArg {
+        name: "perm_eq",
+        short: 'p',
+        long: "permeq",
+        help: String::from("consider files with different permissions different files"),
+        action: Box::new(PermissionEqualChecker),
+    };
+
+    vec![perm_eq]
 }
 
 pub struct ReplaceWithSymlinkFileAction;
@@ -57,3 +72,28 @@ impl FileConsumeAction for ReplaceWithSymlinkFileAction {
     }
 }
 
+#[derive(Clone, Default)]
+struct PermissionEqualChecker;
+
+impl FileEqualsChecker for PermissionEqualChecker {
+    fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError> {
+        let a = std::fs::File::open(a).map_err(|_| CheckEqualsError::first_err())?;
+        let b = std::fs::File::open(b).map_err(|_| CheckEqualsError::second_err())?;
+
+        let metadata_a = a.metadata().map_err(|_| CheckEqualsError::first_err())?;
+        let metadata_b= b.metadata().map_err(|_| CheckEqualsError::second_err())?;
+        let perm_a = metadata_a.permissions().mode() & 0b111_111_111;
+        let perm_b =metadata_b.permissions().mode() & 0b111_111_111;
+        Ok(perm_a == perm_b)
+    }
+
+    fn hash_component(&mut self, a: &PathBuf, hasher: &mut dyn Hasher) -> Result<(), ()> {
+        let perms = a.metadata().map_err(|_| ())?.mode() & 0b111_111_111;
+        hasher.write_u32(perms);
+        Ok(())
+    }
+
+    fn work_severity(&self) -> FileWork {
+        FileWork::FileMetadataWork
+    }
+}

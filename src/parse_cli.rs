@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
 use clap::builder::{PossibleValue, PossibleValuesParser};
+use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 
 use crate::LinkedPath;
-use crate::os::{SetOrderOption, SimpleFileConsumeActionArg};
+use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::set_consumer::{DeleteFileAction, DryRun, FileConsumeAction, FileSetConsumer, InteractiveEachChoice, ReplaceWithHardLinkFileAction, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
 
@@ -11,6 +12,7 @@ pub struct ExecutionPlan {
     pub dirs: Vec<Arc<LinkedPath>>,
     pub recursive_dirs: Vec<Arc<LinkedPath>>,
     pub follow_symlinks: bool,
+    pub file_equals: Vec<Box<dyn FileEqualsChecker>>,
     pub order_set: Vec<Box<dyn SetOrder>>,
     pub action: Box<dyn FileSetConsumer>,
 }
@@ -48,6 +50,9 @@ fn assemble_command_info() -> clap::Command {
     for (name, short, long, help, _) in get_file_consume_action_args(){
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group("file_action"));
     }
+    for (name, short, long, help, _) in get_file_equals_args() {
+        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue))
+    }
     command
 }
 
@@ -61,7 +66,7 @@ fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder>> {
     match matches.get_many::<String>("setorder") {
         Some(options) => {
             let variants = get_set_order_options();
-            options.map(|sname| variants.iter().find(|(name, _, _)| name == sname).unwrap().2.boxed_dyn_clone()).collect::<Vec<_>>()
+            options.map(|sname| variants.iter().find(|(name, _, _)| name == sname).unwrap().2.dyn_clone()).collect::<Vec<_>>()
         }
         None => {
             let default: Box<dyn SetOrder> = Box::new(ModTimeSetOrder::new(false));
@@ -99,7 +104,17 @@ fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, Stri
         .map(|SimpleFileConsumeActionArg { name, short, long, help, action }| (name, short, long, help, action));
     default.extend(os_specific);
     default
+}
 
+fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker>)>{
+    let mut default: Vec<(_, _, _, _, Box<dyn FileEqualsChecker>)> = vec![
+        ("contenteq", 'c', "contenteq", String::from("compare files byte-by-byte"), Box::new(FileContentEquals::default()))
+    ];
+    let os_specific = crate::os::get_file_equals_simple()
+        .into_iter()
+        .map(|SimpleFieEqualCheckerArg { name, short, long, help, action }| (name,short, long, help, action));
+    default.extend(os_specific);
+    default
 }
 
 fn set_order_parser() -> clap::builder::ValueParser {
@@ -131,6 +146,13 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         .find(|(name, _)| matches.get_flag(name))
         .map(|(_, i)| i);
 
+    let file_equals = get_file_equals_args()
+        .into_iter()
+        .map(|(name, _, _, _, i)| (name, i))
+        .filter(|(name, _)|matches.get_flag(name))
+        .map(|(_, i)| i)
+        .collect::<Vec<_>>();
+
     let file_set_consumer: Box<dyn FileSetConsumer> = if matches.get_flag("uncond") {
         Box::new(UnconditionalAction::new(file_action.expect("file action should be present per command config")))
     } else if matches.get_flag("iact") {
@@ -150,6 +172,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         dirs,
         recursive_dirs,
         follow_symlinks: false,
+        file_equals,
         order_set: set_ordering,
         action: file_set_consumer,
     };
