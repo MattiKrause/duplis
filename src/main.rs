@@ -4,17 +4,19 @@ mod parse_cli;
 mod os;
 mod file_set_refiner;
 mod util;
+mod file_filters;
 
 
 use std::collections::HashMap;
-use std::ffi::{OsString};
-use std::hash::{Hash, Hasher};
+use std::ffi::OsString;
+use std::hash::{Hasher};
 
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime};
-use crate::file_set_refiner::{FileEqualsChecker};
+use std::time::SystemTime;
+use crate::file_filters::FileFilter;
+use crate::file_set_refiner::FileEqualsChecker;
 
 
 use crate::parse_cli::ExecutionPlan;
@@ -77,12 +79,12 @@ fn main() {
 
     env_logger::builder().init();
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
-    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks: _, file_equals, mut order_set, action: mut file_set_action } = parse_cli::parse().unwrap();
+    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter } = parse_cli::parse().unwrap();
 
     let (files_send, files_rev) = flume::unbounded();
 
     for (dir, rec) in dirs.into_iter().map(|d| (d, false)).chain(recursive_dirs.into_iter().map(|d| (d, true))) {
-        produce_list(dir, rec, |file| {
+        produce_list(dir, &mut file_filter, rec, follow_symlinks, |file| {
             files_send.send(file).expect("sink leads to nowhere; this should not happen")
         });
     }
@@ -120,7 +122,7 @@ fn main() {
     }
 }
 
-fn produce_list(path: Arc<LinkedPath>, recursive: bool, mut write_target: impl FnMut(LinkedPath)) {
+fn produce_list(path: Arc<LinkedPath>, mut file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
     let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
@@ -132,9 +134,41 @@ fn produce_list(path: Arc<LinkedPath>, recursive: bool, mut write_target: impl F
             let Ok(entry) = entry else { break; };
             let Ok(file_type) = entry.file_type() else { continue; };
             if file_type.is_file() {
-                write_target(LinkedPath(Some(dir.clone()), entry.file_name()));
+                let file_name = entry.file_name();
+                path_acc.push(file_name);
+                let file_name = LinkedPath(Some(dir.clone()), entry.file_name());
+                let keep_file = if cfg!(windows) {
+                    if let Ok(md) = entry.metadata() {
+                        file_filter.keep_file_md(&file_name, &path_acc, &md)
+                    } else {
+                        false
+                    }
+                } else {
+                    file_filter.keep_file(&file_name, &path_acc)
+                };
+                if keep_file {
+                    write_target(file_name);
+                }
+                path_acc.pop();
             } else if file_type.is_dir() && recursive {
                 dir_list.push(Arc::new(LinkedPath(Some(dir.clone()), entry.file_name())));
+            } else if file_type.is_symlink() && follow_symlink {
+                let entry_name = entry.file_name();
+                path_acc.push(&entry_name);
+                let Ok(metadata) = std::fs::metadata(&path_acc) else {
+                    path_acc.pop();
+                    continue
+                };
+                let entry_name = LinkedPath(Some(dir.clone()), entry_name);
+                if metadata.is_file() {
+                    let keep_file = file_filter.keep_file_md(&entry_name, &path_acc, &metadata);
+                    if keep_file {
+                        write_target(entry_name)
+                    }
+                } else if metadata.is_dir() && recursive {
+                    dir_list.push(Arc::new(entry_name))
+                }
+                path_acc.pop();
             }
         }
     }

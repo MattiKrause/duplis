@@ -1,10 +1,16 @@
+mod parse_file_size;
+
+use std::ffi::OsStr;
 use std::sync::Arc;
-use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
-use clap::builder::{PossibleValue, PossibleValuesParser};
+use clap::{arg, Arg, ArgAction, ArgGroup, Command, Error, value_parser, ValueHint};
+use clap::builder::{PossibleValue, PossibleValuesParser, StringValueParser, TypedValueParser, ValueParser};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use crate::file_filters::{FileFilter, FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 
 use crate::LinkedPath;
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
+use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
 use crate::set_consumer::{DeleteFileAction, DryRun, FileConsumeAction, FileSetConsumer, InteractiveEachChoice, ReplaceWithHardLinkFileAction, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
 
@@ -15,6 +21,7 @@ pub struct ExecutionPlan {
     pub file_equals: Vec<Box<dyn FileEqualsChecker>>,
     pub order_set: Vec<Box<dyn SetOrder>>,
     pub action: Box<dyn FileSetConsumer>,
+    pub file_filter: FileFilter
 }
 
 fn assemble_command_info() -> clap::Command {
@@ -45,6 +52,17 @@ fn assemble_command_info() -> clap::Command {
             .help("set the order in which the elements of equal file sets are ordered; the smallest is considered the original; may contain multiple orderings in decreasing importance; some orderings may be prefixed with r to reverse(example rmodtime)")
             .required(false)
         )
+        .arg(arg!(minfsize: --minsize <SIZE>)
+            .action(ArgAction::Set)
+            .required(false)
+            .value_parser(ValueParser::from(FileSizeValueParser))
+        )
+        .arg(arg!(maxfsize: --maxsize <SIZE>)
+            .action(ArgAction::Set)
+            .required(false)
+            .value_parser(ValueParser::from(FileSizeValueParser))
+        )
+        .arg(arg!(nonzerof: -Z --nonzero).action(ArgAction::SetTrue).required(false))
         .group(ArgGroup::new("action_mode_action").requires("file_action"))
         .group(ArgGroup::new("file_action").requires("action_mode_action"));
     for (name, short, long, help, _) in get_file_consume_action_args(){
@@ -127,7 +145,6 @@ fn set_order_parser() -> clap::builder::ValueParser {
         .into()
 }
 
-
 pub fn parse() -> Result<ExecutionPlan, ()> {
     let matches = assemble_command_info()
         .get_matches();
@@ -135,6 +152,20 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
 
     let mut dirs = parse_directories(&matches);
     let mut rec_dirs = vec![];
+
+    let file_filter = {
+        let mut metadata_filter: Vec<Box<dyn FileMetadataFilter>> = Vec::new();
+        if let Some(filter) = matches.get_one::<FileSize>("maxfsize") {
+            metadata_filter.push(Box::new(MaxSizeFileFilter(filter.0)))
+        }
+        if let Some(filter) = matches.get_one::<FileSize>("minfsize") {
+            metadata_filter.push(Box::new(MinSizeFileFilter(filter.0.saturating_sub(1))))
+        }
+        if matches.get_flag("nonzerof") {
+            metadata_filter.push(Box::new(MinSizeFileFilter(0)))
+        }
+        FileFilter(Box::new([]), metadata_filter.into_boxed_slice())
+    };
 
     let recurse = matches.get_flag("recurse");
 
@@ -175,6 +206,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         file_equals,
         order_set: set_ordering,
         action: file_set_consumer,
+        file_filter,
     };
     Ok(plan)
 }
