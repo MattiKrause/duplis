@@ -4,7 +4,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
-use crate::Recoverable;
+use crate::{handle_file_op, Recoverable, report_file_action};
+use crate::error_handling::AlreadyReportedError;
 use crate::set_consumer::{FileConsumeAction, FileConsumeResult};
 
 pub fn get_set_order_options() -> Vec<SetOrderOption> {
@@ -39,23 +40,13 @@ pub struct ReplaceWithSymlinkFileAction;
 impl FileConsumeAction for ReplaceWithSymlinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
         let original = original.expect("original required");
-        if let Err(err) = std::fs::remove_file(path) {
-            match err.kind() {
-                std::io::ErrorKind::NotFound => {}
-                std::io::ErrorKind::PermissionDenied => {
-                    log::info!("failed to delete file {} in order to replace it with a sym link due to lacking permissions", path.display());
-                    return Err(Recoverable::Recoverable(()));
-                }
-                _ => {
-                    log::warn!("failed ot delete file {} in order to replace it with a sym link due error {err}", path.display());
-                }
-            }
-        };
+        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         if let Err(err) = std::os::unix::fs::symlink(original, path) {
             log::error!("FATAL ERROR: failed to create sym link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
-            return Err(Recoverable::Fatal(()));
+            return Err(Recoverable::Fatal(AlreadyReportedError));
         }
+        report_file_action!("replaced {} with symlink to {}", path.display(), original.display());
         Ok(())
     }
 
@@ -77,18 +68,16 @@ struct PermissionEqualChecker;
 
 impl FileEqualsChecker for PermissionEqualChecker {
     fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError> {
-        let a = std::fs::File::open(a).map_err(|_| CheckEqualsError::first_err())?;
-        let b = std::fs::File::open(b).map_err(|_| CheckEqualsError::second_err())?;
-
-        let metadata_a = a.metadata().map_err(|_| CheckEqualsError::first_err())?;
-        let metadata_b= b.metadata().map_err(|_| CheckEqualsError::second_err())?;
+        let metadata_a = handle_file_op!(a.metadata(), a, return Err(CheckEqualsError::first_err()));
+        let metadata_b= handle_file_op!(b.metadata(), b, return Err(CheckEqualsError::second_err()));
         let perm_a = metadata_a.permissions().mode() & 0b111_111_111;
         let perm_b =metadata_b.permissions().mode() & 0b111_111_111;
         Ok(perm_a == perm_b)
     }
 
-    fn hash_component(&mut self, a: &PathBuf, hasher: &mut dyn Hasher) -> Result<(), ()> {
-        let perms = a.metadata().map_err(|_| ())?.mode() & 0b111_111_111;
+    fn hash_component(&mut self, a: &PathBuf, hasher: &mut dyn Hasher) -> Result<(), AlreadyReportedError> {
+        let metadata = handle_file_op!(a.metadata(), a, return Err(AlreadyReportedError));
+        let perms = metadata.mode() & 0b111_111_111;
         hasher.write_u32(perms);
         Ok(())
     }

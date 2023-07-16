@@ -1,14 +1,14 @@
 use std::borrow::Cow;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use crate::{BoxErr, HashedFile, Recoverable};
+use crate::{handle_file_op, HashedFile, Recoverable};
+use crate::error_handling::AlreadyReportedError;
 
 pub trait FileSetConsumer {
     // first element of set is the 'original'
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), BoxErr>;
+    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
 
-pub type FileConsumeResult = Result<(), Recoverable<(), ()>>;
+pub type FileConsumeResult = Result<(), Recoverable<AlreadyReportedError, AlreadyReportedError>>;
 pub trait FileConsumeAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult;
     fn requires_original(&self) -> bool;
@@ -56,6 +56,11 @@ pub struct DeleteFileAction { _p: () }
 #[derive(Default)]
 pub struct ReplaceWithHardLinkFileAction { _p: () }
 
+#[macro_export]
+macro_rules! report_file_action {
+    ($text: literal, $($r: expr),*) => {log::info!(target: "file_action", $text, $($r),*)};
+}
+
 
 impl Default for DryRun<std::io::Stdout> {
     fn default() -> Self {
@@ -84,22 +89,22 @@ impl DryRun<std::io::Stdout> {
 macro_rules! out_err_map {
     () => { |err| {
         log::error!("cannot write out in interactive mode: {err}; aborting");
-        BoxErr::from(format!("cannot write out in interactive mode: {err}; aborting"))
+        AlreadyReportedError
     }};
 }
 
 macro_rules! in_err_map {
     () => { |err| {
         log::error!("cannot accept input in interactive mode: {err}; aborting");
-        BoxErr::from(format!("cannot accept input in interactive mode: {err}; aborting"))
+        AlreadyReportedError
     }};
 }
 
 impl<W: std::io::Write> FileSetConsumer for DryRun<W> {
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), BoxErr> {
+    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.path_buf.clear();
         set[0].file_path.push_full_to_buf(&mut self.path_buf);
-        write!(self.write, "keeping {}, deleting ", self.path_buf.display()).map_err(out_err_map!())?;
+        write!(self.write, "keeping {}, dry-deleting ", self.path_buf.display()).map_err(out_err_map!())?;
         let mut write_sep = false;
         for file in &set[1..] {
             if write_sep {
@@ -126,15 +131,16 @@ impl UnconditionalAction {
 }
 
 impl FileSetConsumer for UnconditionalAction {
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), BoxErr> {
+    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.original_buf.clear();
         set[0].file_path.push_full_to_buf(&mut self.original_buf);
         let original_buf = &self.original_buf;
         for file in &set[1..] {
             self.running_buf.clear();
             file.file_path.push_full_to_buf(&mut self.running_buf);
-            if let Err(Recoverable::Fatal(())) = self.action.consume(&self.running_buf, Some(&original_buf)) {
-                return Err(format!("consume set failed").into())
+            if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&original_buf)) {
+                log::error!("aborting '{}' due to previous error", self.action.short_name());
+                return Err(AlreadyReportedError)
             };
         }
         Ok(())
@@ -168,7 +174,7 @@ impl<R, W> InteractiveEachChoice<R, W> {
 }
 
 impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEachChoice<R, W> {
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), BoxErr> {
+    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.original_buf.clear();
         set[0].file_path.push_full_to_buf(&mut self.original_buf);
         for file in &set[1..] {
@@ -191,8 +197,9 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
             };
 
             if execute_action {
-                if let Err(Recoverable::Fatal(())) = self.action.consume(&self.running_buf, Some(&self.original_buf)) {
-                    return Err(format!("set consumer failed").into())
+                if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&self.original_buf)) {
+                    log::error!("aborting '{}' due to previous error", self.action.short_name());
+                    return Err(AlreadyReportedError)
                 };
             }
         }
@@ -201,7 +208,7 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
 }
 
 impl FileSetConsumer for NoopFileAction {
-    fn consume_set(&mut self, _set: Vec<HashedFile>) -> Result<(), BoxErr> {
+    fn consume_set(&mut self, _set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         Ok(())
     }
 }
@@ -227,19 +234,8 @@ impl FileConsumeAction for DebugFileAction {
 
 impl FileConsumeAction for DeleteFileAction {
     fn consume(&mut self, path: &Path, _original: Option<&Path>) -> FileConsumeResult {
-        if let Err(err) =  std::fs::remove_file(path) {
-            return match err.kind() {
-                ErrorKind::NotFound => Ok(()),
-                ErrorKind::PermissionDenied => {
-                    log::info!("failed to delete {} due to lacking permissions", path.display());
-                    Err(Recoverable::Recoverable(()))
-                }
-                _ => {
-                    log::warn!("failed to delete {} due to error {err}", path.display());
-                    Err(Recoverable::Recoverable(()))
-                }
-            }
-        };
+        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
+        report_file_action!("deleted file {}", path.display());
         Ok(())
     }
 
@@ -259,23 +255,13 @@ impl FileConsumeAction for DeleteFileAction {
 impl FileConsumeAction for ReplaceWithHardLinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
         let original = original.expect("original required");
-        if let Err(err) = std::fs::remove_file(path) {
-            match err.kind() {
-                ErrorKind::NotFound => {}
-                ErrorKind::PermissionDenied => {
-                    log::info!("failed to delete file {} in order to replace it with a hard link due to lacking permissions", path.display());
-                    return Err(Recoverable::Recoverable(()));
-                }
-                _ => {
-                    log::warn!("failed ot delete file {} in order to replace it with a hard link due error {err}", path.display());
-                }
-            }
-        };
+        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         if let Err(err) = std::fs::hard_link(original, path) {
             log::error!("FATAL ERROR: failed to create hard link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
-            return Err(Recoverable::Fatal(()));
+            return Err(Recoverable::Fatal(AlreadyReportedError));
         }
+        report_file_action!("replaced {} with a hard link to {}", path.display(), original.display());
         Ok(())
     }
 

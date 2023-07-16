@@ -1,7 +1,7 @@
 use std::fs::Metadata;
 use std::ops::DerefMut;
 use std::path::Path;
-use crate::LinkedPath;
+use crate::{handle_file_op, LinkedPath};
 
 pub struct FileFilter(pub Box<[Box<dyn FileNameFilter>]>, pub Box<[Box<dyn FileMetadataFilter>]>);
 
@@ -31,14 +31,7 @@ impl FileFilter {
         if !self.filter_name(name, name_path) {
             return false;
         }
-        let metadata = match std::fs::metadata(name_path) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                dbg!(name_path);
-                println!("{err}");
-                return false
-            },
-        };
+        let metadata = handle_file_op!(std::fs::metadata(name_path), name_path, return false);
         self.filter_metadata(name, name_path, &metadata)
     }
 

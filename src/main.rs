@@ -5,6 +5,7 @@ mod os;
 mod file_set_refiner;
 mod util;
 mod file_filters;
+mod error_handling;
 
 
 use std::collections::HashMap;
@@ -15,6 +16,10 @@ use std::hash::{Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+use clap::builder::ValueRange;
+use log::LevelFilter;
+use simplelog::{Config, ConfigBuilder};
+use crate::error_handling::AlreadyReportedError;
 use crate::file_filters::FileFilter;
 use crate::file_set_refiner::FileEqualsChecker;
 
@@ -77,7 +82,7 @@ fn main() {
     // work queue: 1 Thread -> one working thread
     // single ui responsive
 
-    env_logger::builder().init();
+    simplelog::SimpleLogger::init(LevelFilter::Trace, Config::default()).unwrap();
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
     let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter } = parse_cli::parse().unwrap();
 
@@ -113,7 +118,12 @@ fn main() {
             continue;
         }
         for order in &mut order_set {
-            order.order(&mut set.1).unwrap();
+            if let Err(AlreadyReportedError {}) = order.order(&mut set.1) {
+                break;
+            }
+        }
+        if set.1.len() <= 1 {
+            continue;
         }
 
         if let Err(_) = file_set_action.consume_set(set.1) {
@@ -180,22 +190,18 @@ fn place_into_file_set<'s, F>(
     tmp_buf: &mut PathBuf,
     refiners: &mut [Box<dyn FileEqualsChecker>],
     find_set: F
-) -> Result<(), ()>
+) -> Result<(), AlreadyReportedError>
 where F: FnOnce(u128) -> &'s mut Vec<(u128, Vec<HashedFile>)>{
     let hash = hash_file::<xxhash_rust::xxh3::Xxh3>(&file);
     let (mut hash, modtime) = match hash {
         Ok(value) => value,
         Err(HashFileError::FileChanged) => {
-            log::warn!("file {} changed during hashing; ignoring file", file.display());;
-            return Err(())
+            handle_file_modified!(file);
+            return Err(AlreadyReportedError)
         },
         Err(HashFileError::IO(err)) => {
-            match err.kind() {
-                std::io::ErrorKind::PermissionDenied => log::warn!("no permission to access {}; ignoring file", file.display()),
-                std::io::ErrorKind::NotFound => {}
-                _ => log::warn!("failed to access file {} due to {err}; ignoring file", file.display())
-            }
-            return Err(())
+            handle_file_error!(file, err);
+            return Err(AlreadyReportedError)
         }
     };
     let file_hash = hash.digest128();
@@ -224,12 +230,13 @@ where F: FnOnce(u128) -> &'s mut Vec<(u128, Vec<HashedFile>)>{
             let is_equals = match refiner.check_equal(tmp_buf, file) {
                 Ok(result) => result,
                 Err(err) => {
-                    if err.first_faulty {
+                    let (first_faulty, second_faulty) = err.is_faulty();
+                    if first_faulty {
                        set.remove(0);
                         break;//TODO replace with retry
                     }
-                    if err.second_faulty {
-                        return Err(())
+                    if second_faulty {
+                        return Err(AlreadyReportedError)
                     }
                     continue;
                 }

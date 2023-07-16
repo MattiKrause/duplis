@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use std::time::SystemTime;
-use crate::{BoxErr, HashedFile};
+use crate::{handle_file_modified, handle_file_op, HashedFile};
+use crate::error_handling::AlreadyReportedError;
 use crate::util::DynCloneSetOrder;
 
 pub trait SetOrder: DynCloneSetOrder {
-    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr>;
+    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
 
 macro_rules! impl_new_rev {
@@ -36,7 +37,7 @@ impl NoopSetOrder {
 }
 
 impl SetOrder for NoopSetOrder {
-    fn order(&mut self, _files: &mut Vec<HashedFile>) -> Result<(), Box<dyn std::error::Error>> {
+    fn order(&mut self, _files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         Ok(())
     }
 }
@@ -52,7 +53,7 @@ impl <T> Default for MetadataSetOrder<T> {
 }
 
 impl <F: Ord> MetadataSetOrder<F> {
-    fn order(&mut self, files: &mut Vec<HashedFile>, key_extract: impl Fn(std::fs::Metadata) -> Result<F, BoxErr>) -> Result<(), BoxErr> {
+    fn order(&mut self, files: &mut Vec<HashedFile>, key_extract: impl Fn(std::fs::Metadata) -> Result<F, AlreadyReportedError>) -> Result<(), AlreadyReportedError> {
         self.file_buf.clear();
         self.file_buf.reserve(files.len());
         for file_data in files.drain(..) {
@@ -61,9 +62,10 @@ impl <F: Ord> MetadataSetOrder<F> {
 
             let file = std::fs::OpenOptions::new().read(true).write(false)
                 .open(&self.path_buf);
-            let Ok(file) = file else { continue };
-            let Ok(metadata) = file.metadata() else { continue };
+            let file =  handle_file_op!(file, self.path_buf, continue);
+            let metadata = handle_file_op!(file.metadata(), self.path_buf, continue);
             if metadata.modified().ok() != file_data.file_version_timestamp {
+                handle_file_modified!(self.path_buf);
                 continue;
             }
 
@@ -82,22 +84,32 @@ impl <F: Ord> MetadataSetOrder<F> {
 impl_new_rev!(ModTimeSetOrder, this, this.0);
 
 impl SetOrder for ModTimeSetOrder {
-    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
-        self.0.order(files, |md| md.modified().map_err(|err| BoxErr::from(format!("cannot access modification time on current platform: {err}"))))
+    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        self.0.order(files, |md| {
+            md.modified().map_err(|err| {
+                log::error!("cannot access modification time on current platform: {err}");
+                AlreadyReportedError
+            })
+        })
     }
 }
 impl_new_rev!(CreateTimeSetOrder, this, this.0);
 
 impl SetOrder for CreateTimeSetOrder {
-    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
-        self.0.order(files, |md| md.created().map_err(|err| format!("cannot access modification time on current platform: {err}").into()))
+    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        self.0.order(files, |md| {
+            md.created().map_err(|err| {
+                log::error!("cannot access creation time on current platform: {err}");
+                AlreadyReportedError
+            })
+        })
     }
 }
 
 impl_new_rev!(NameAlphabeticSetOrder, this, this);
 
 impl SetOrder for NameAlphabeticSetOrder {
-    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), BoxErr> {
+    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.sort_buf.clear();
         self.sort_buf.reserve(files.len());
 
