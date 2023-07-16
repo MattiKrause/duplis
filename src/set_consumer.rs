@@ -1,31 +1,22 @@
-use std::borrow::Cow;
-use std::path::{Path, PathBuf};
-use crate::{handle_file_op, HashedFile, Recoverable};
+use std::path::{PathBuf};
+use crate::{HashedFile, Recoverable};
 use crate::error_handling::AlreadyReportedError;
+use crate::file_action::FileConsumeAction;
+use crate::util::ChoiceInputReader;
 
 pub trait FileSetConsumer {
-    // first element of set is the 'original'
+    /// first element of set is the 'original'
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
 
-pub type FileConsumeResult = Result<(), Recoverable<AlreadyReportedError, AlreadyReportedError>>;
-pub trait FileConsumeAction {
-    fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult;
-    fn requires_original(&self) -> bool;
-    fn short_name(&self) -> Cow<str>;
-    fn short_opposite(&self) -> Cow<str>;
-}
-
-pub trait ChoiceInputReader {
-    fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()>;
-}
-
+/// execute given [FileConsumeAction] without user input
 pub struct UnconditionalAction {
     running_buf: PathBuf,
     original_buf: PathBuf,
     action: Box<dyn FileConsumeAction>,
 }
 
+/// execute given [FileConsumeAction] after asking user
 pub struct InteractiveEachChoice<R, W> {
     running_buf: PathBuf,
     original_buf: PathBuf,
@@ -35,31 +26,20 @@ pub struct InteractiveEachChoice<R, W> {
     write: W,
 }
 
+
 pub struct InteractiveSetChoice {
     path_buf: PathBuf,
     input_buf: String,
     action: Box<dyn FileConsumeAction>,
 }
 
-
+/// simply print all files that would be affected by an action
 pub struct DryRun<W> {
     path_buf: PathBuf,
     write: W,
 }
 
-#[derive(Default)]
-pub struct NoopFileAction;
-#[derive(Default)]
-pub struct DebugFileAction { _p: () }
-#[derive(Default)]
-pub struct DeleteFileAction { _p: () }
-#[derive(Default)]
-pub struct ReplaceWithHardLinkFileAction { _p: () }
 
-#[macro_export]
-macro_rules! report_file_action {
-    ($text: literal, $($r: expr),*) => {log::info!(target: "file_action", $text, $($r),*)};
-}
 
 
 impl Default for DryRun<std::io::Stdout> {
@@ -86,6 +66,7 @@ impl DryRun<std::io::Stdout> {
     }
 }
 
+/// in case the out-stream of the printing consumers fails
 macro_rules! out_err_map {
     () => { |err| {
         log::error!("cannot write out in interactive mode: {err}; aborting");
@@ -93,6 +74,7 @@ macro_rules! out_err_map {
     }};
 }
 
+/// in case the in-stream of the interactive consumers fails
 macro_rules! in_err_map {
     () => { |err| {
         log::error!("cannot accept input in interactive mode: {err}; aborting");
@@ -102,8 +84,8 @@ macro_rules! in_err_map {
 
 impl<W: std::io::Write> FileSetConsumer for DryRun<W> {
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        self.path_buf.clear();
-        set[0].file_path.push_full_to_buf(&mut self.path_buf);
+
+        set[0].file_path.write_full_to_buf(&mut self.path_buf);
         write!(self.write, "keeping {}, dry-deleting ", self.path_buf.display()).map_err(out_err_map!())?;
         let mut write_sep = false;
         for file in &set[1..] {
@@ -111,8 +93,7 @@ impl<W: std::io::Write> FileSetConsumer for DryRun<W> {
                 write!(self.write, ", ").map_err(out_err_map!())?;
             }
             write_sep = true;
-            self.path_buf.clear();
-            file.file_path.push_full_to_buf(&mut self.path_buf);
+            file.file_path.write_full_to_buf(&mut self.path_buf);
             write!(self.write, "{}", self.path_buf.display()).map_err(out_err_map!())?;
         }
         writeln!(self.write).map_err(out_err_map!())?;
@@ -132,25 +113,16 @@ impl UnconditionalAction {
 
 impl FileSetConsumer for UnconditionalAction {
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        self.original_buf.clear();
-        set[0].file_path.push_full_to_buf(&mut self.original_buf);
+        set[0].file_path.write_full_to_buf(&mut self.original_buf);
         let original_buf = &self.original_buf;
         for file in &set[1..] {
-            self.running_buf.clear();
-            file.file_path.push_full_to_buf(&mut self.running_buf);
+            file.file_path.write_full_to_buf(&mut self.running_buf);
             if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&original_buf)) {
                 log::error!("aborting '{}' due to previous error", self.action.short_name());
                 return Err(AlreadyReportedError)
             };
         }
         Ok(())
-    }
-}
-
-impl ChoiceInputReader for std::io::Stdin {
-    fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()> {
-        use std::io::BufRead;
-        self.lock().read_line(buf).map(|_| ())
     }
 }
 
@@ -175,11 +147,10 @@ impl<R, W> InteractiveEachChoice<R, W> {
 
 impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEachChoice<R, W> {
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        self.original_buf.clear();
-        set[0].file_path.push_full_to_buf(&mut self.original_buf);
+        set[0].file_path.write_full_to_buf(&mut self.original_buf);
         for file in &set[1..] {
-            self.running_buf.clear();
-            file.file_path.push_full_to_buf(&mut self.running_buf);
+            file.file_path.write_full_to_buf(&mut self.running_buf);
+
             write!(self.write, "{} {}? ", self.action.short_name().as_ref(), self.running_buf.display()).map_err(out_err_map!())?;
             let execute_action = loop {
                 self.write.flush().map_err(out_err_map!())?;
@@ -204,76 +175,5 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
             }
         }
         Ok(())
-    }
-}
-
-impl FileSetConsumer for NoopFileAction {
-    fn consume_set(&mut self, _set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        Ok(())
-    }
-}
-
-impl FileConsumeAction for DebugFileAction {
-    fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
-        dbg!(path, original);
-        Ok(())
-    }
-
-    fn requires_original(&self) -> bool {
-        false
-    }
-
-    fn short_name(&self) -> Cow<str> {
-        Cow::Borrowed("debug print")
-    }
-
-    fn short_opposite(&self) -> Cow<str> {
-        Cow::Borrowed("ignore")
-    }
-}
-
-impl FileConsumeAction for DeleteFileAction {
-    fn consume(&mut self, path: &Path, _original: Option<&Path>) -> FileConsumeResult {
-        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
-        report_file_action!("deleted file {}", path.display());
-        Ok(())
-    }
-
-    fn requires_original(&self) -> bool {
-        false
-    }
-
-    fn short_name(&self) -> Cow<str> {
-        Cow::Borrowed("delete")
-    }
-
-    fn short_opposite(&self) -> Cow<str> {
-        Cow::Borrowed("keep")
-    }
-}
-
-impl FileConsumeAction for ReplaceWithHardLinkFileAction {
-    fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
-        let original = original.expect("original required");
-        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
-        if let Err(err) = std::fs::hard_link(original, path) {
-            log::error!("FATAL ERROR: failed to create hard link to {} from {} due to error {err}", path.display(), original.display());
-            // Something is absolutely not right here, continuing means risk of data loss
-            return Err(Recoverable::Fatal(AlreadyReportedError));
-        }
-        report_file_action!("replaced {} with a hard link to {}", path.display(), original.display());
-        Ok(())
-    }
-
-    fn requires_original(&self) -> bool {
-        true
-    }
-
-    fn short_name(&self) -> Cow<str> {
-        Cow::Borrowed("replace with hardlink")
-    }
-
-    fn short_opposite(&self) -> Cow<str> {
-        Cow::Borrowed("keep")
     }
 }

@@ -27,6 +27,7 @@ impl FileFilter {
         true
     }
 
+    /// run the file through all filters, request metadata as needed,  return true if all filters return true
     pub fn keep_file(&mut self, name: &LinkedPath, name_path: &Path) -> bool {
         if !self.filter_name(name, name_path) {
             return false;
@@ -35,23 +36,37 @@ impl FileFilter {
         self.filter_metadata(name, name_path, &metadata)
     }
 
+    /// run the file through all filters with the metadata provided
     pub fn keep_file_md(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> bool {
         if !self.filter_name(name, name_path) {
             return false;
         }
         self.filter_metadata(name, name_path, metadata)
     }
+
+    pub fn keep_file_dir_entry(&mut self, name: &LinkedPath, name_path: &Path, entry: std::fs::DirEntry) -> bool {
+        if cfg!(windows) {
+            let Ok(metadata) = entry.metadata() else { return false };
+            self.keep_file_md(&name, &name_path, &metadata)
+        } else {
+            self.keep_file(name, name_path)
+        }
+    }
 }
 
+/// Filters files only based on the name
 pub trait FileNameFilter {
     fn filter_file_name(&mut self, name: &LinkedPath, name_path: &Path) -> Result<bool, ()>;
 }
 
+/// Filters files based on the name and metadata
 pub trait FileMetadataFilter {
     fn filter_file_metadata(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> Result<bool, ()>;
 }
 
+/// Only allow files with more than the given size
 pub struct MinSizeFileFilter(pub u64);
+/// Only allow files with less than the given size
 pub struct MaxSizeFileFilter(pub u64);
 
 impl FileMetadataFilter for MinSizeFileFilter {

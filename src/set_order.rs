@@ -2,11 +2,12 @@ use std::path::{PathBuf};
 use std::time::SystemTime;
 use crate::{handle_file_modified, handle_file_op, HashedFile};
 use crate::error_handling::AlreadyReportedError;
-use crate::util::DynCloneSetOrder;
 
 pub trait SetOrder: DynCloneSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
+
+crate::dyn_clone_impl!(DynCloneSetOrder, crate::set_order::SetOrder);
 
 macro_rules! impl_new_rev {
     ($t: ident, $this: ident, $r: expr) => {
@@ -20,15 +21,20 @@ macro_rules! impl_new_rev {
     };
 }
 
+/// generic component for sorting from a metadata property
 #[derive(Clone)]
 pub struct MetadataSetOrder<F> { path_buf: PathBuf, file_buf: Vec<(F, HashedFile)>, reverse: bool }
 
+/// don't sort at all
 #[derive(Default, Clone)]
 pub struct NoopSetOrder;
+/// sort set by file modification timestamp
 #[derive(Default, Clone)]
 pub struct ModTimeSetOrder(MetadataSetOrder<SystemTime>);
+/// sort set by file creation timestamp
 #[derive(Default, Clone)]
 pub struct CreateTimeSetOrder(MetadataSetOrder<SystemTime>);
+/// sort set by file name
 #[derive(Default, Clone)]
 pub struct NameAlphabeticSetOrder { sort_buf: Vec<(HashedFile, PathBuf)>, unused_buf: Vec<PathBuf>, reverse: bool }
 
@@ -57,13 +63,12 @@ impl <F: Ord> MetadataSetOrder<F> {
         self.file_buf.clear();
         self.file_buf.reserve(files.len());
         for file_data in files.drain(..) {
-            self.path_buf.clear();
-            file_data.file_path.push_full_to_buf(&mut self.path_buf);
+            file_data.file_path.write_full_to_buf(&mut self.path_buf);
 
-            let file = std::fs::OpenOptions::new().read(true).write(false)
-                .open(&self.path_buf);
-            let file =  handle_file_op!(file, self.path_buf, continue);
-            let metadata = handle_file_op!(file.metadata(), self.path_buf, continue);
+            // remove data from set if access error
+            let metadata = handle_file_op!(self.path_buf.metadata(), self.path_buf, continue);
+
+            // abort if file modified
             if metadata.modified().ok() != file_data.file_version_timestamp {
                 handle_file_modified!(self.path_buf);
                 continue;
@@ -72,6 +77,7 @@ impl <F: Ord> MetadataSetOrder<F> {
             let key = key_extract(metadata)?;
             self.file_buf.push((key, file_data))
         }
+        // sort stable in case there are multiple sorters
         self.file_buf.sort_by(|(key1, _), (key2, _)| {
             let ordering = key1.cmp(key2);
             if self.reverse { ordering.reverse() } else { ordering }
@@ -117,12 +123,13 @@ impl SetOrder for NameAlphabeticSetOrder {
             .drain(..)
             .zip(self.unused_buf.drain(..).chain(std::iter::repeat_with(PathBuf::new)))
             .map(|(file, mut name)| {
-                name.clear();
-                file.file_path.push_full_to_buf(&mut name);
+                file.file_path.write_full_to_buf(&mut name);
                 (file, name)
             });
 
         self.sort_buf.extend(files_with_names);
+
+        // sort stable in case we have multiple sorters
         self.sort_buf.sort_by(|(_, name1), (_, name2)| {
             let order = name1.cmp(name2);
             if self.reverse { order.reverse() } else { order }

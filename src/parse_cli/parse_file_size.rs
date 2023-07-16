@@ -6,6 +6,7 @@ use clap::error::{ErrorKind as ClapErrorKind, ContextKind as ClapContextKind, Co
 #[derive(Clone)]
 pub(crate) struct FileSize(pub u64);
 
+/// Parse file size in binary/octal/hexadecimal with '_' separators and scale KB to EB and KiB to EiB
 #[derive(Clone)]
 pub(crate) struct FileSizeValueParser;
 impl TypedValueParser for FileSizeValueParser {
@@ -89,6 +90,7 @@ fn format_int_err(err: ParseIntError, cmd: &Command, arg: Option<&Arg>) -> clap:
     err.with_cmd(cmd)
 }
 
+/// parse a number and return the remaining text
 fn parse_number_prefix(text: &str, radix: u8) -> Result<(u64, &str), ParseIntError> {
     assert!(radix > 1);
     assert!(radix <= 10);
@@ -112,6 +114,9 @@ fn parse_number_prefix(text: &str, radix: u8) -> Result<(u64, &str), ParseIntErr
     Ok((acc, remaining))
 }
 
+/// parse a number and maybe parse a scale and return the remaining text.
+/// The parsed scale is necessary since Exabyte is supported. This means 0xEEB cannot be parsed eagerly, as is would result in '0xEE' and 'B'
+/// thus we need check for these cases. In the above example '0xEE', 'B', with scale EB would be returned
 fn partial_parse_hexadecimal_filesize(value: &str) -> Result<(u64, &str, Option<u64>), ParseIntError> {
     let (mut acc, remaining, last_e)= parse_hexadecimal(value)?;
     if last_e && remaining == "" {
@@ -134,6 +139,7 @@ fn partial_parse_hexadecimal_filesize(value: &str) -> Result<(u64, &str, Option<
     Ok((acc, remaining, parsed))
 }
 
+/// parse a number, return the remaining text and whether the number ended on 'e'
 fn parse_hexadecimal(value: &str) -> Result<(u64, &str, bool), ParseIntError> {
     let mut last_e = false;
     let mut chars = value.char_indices();

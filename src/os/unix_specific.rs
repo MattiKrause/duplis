@@ -6,7 +6,7 @@ use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
 use crate::error_handling::AlreadyReportedError;
-use crate::set_consumer::{FileConsumeAction, FileConsumeResult};
+use crate::file_action::{FileConsumeAction, FileConsumeResult};
 
 pub fn get_set_order_options() -> Vec<SetOrderOption> {
     vec![]

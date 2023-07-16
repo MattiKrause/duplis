@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 mod set_order;
 mod set_consumer;
 mod parse_cli;
@@ -6,22 +8,23 @@ mod file_set_refiner;
 mod util;
 mod file_filters;
 mod error_handling;
+mod file_action;
 
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsString};
 use std::hash::{Hasher};
 
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use clap::builder::ValueRange;
+
 use log::LevelFilter;
-use simplelog::{Config, ConfigBuilder};
+use simplelog::{Config};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_filters::FileFilter;
-use crate::file_set_refiner::FileEqualsChecker;
+use crate::file_set_refiner::{FileSetRefiners};
 
 
 use crate::parse_cli::ExecutionPlan;
@@ -45,16 +48,25 @@ impl From<std::io::Error> for HashFileError {
 }
 
 impl LinkedPath {
-    fn push_full_to_buf(&self, buf: &mut PathBuf) {
+    fn new_child(parent: &Arc<LinkedPath>, segment: OsString) -> Self {
+        Self(Some(parent.clone()), segment)
+    }
+
+    fn write_full_to_buf(&self, buf: &mut PathBuf) {
+        buf.clear();
+        self._push_full_to_buf(buf);
+    }
+
+    fn _push_full_to_buf(&self, buf: &mut PathBuf) {
         if let Some(ancestor) = &self.0 {
-            ancestor.push_full_to_buf(buf);
+            ancestor._push_full_to_buf(buf);
         }
         buf.push(&self.1);
     }
 
     fn to_push_buf(&self) -> PathBuf {
         let mut path_buf = PathBuf::new();
-        self.push_full_to_buf(&mut path_buf);
+        self._push_full_to_buf(&mut path_buf);
         path_buf
     }
 
@@ -99,14 +111,13 @@ fn main() {
 
     let mut path_buf = PathBuf::new();
     let mut path_buf_tmp = PathBuf::new();
-    let mut set_refiners: Vec<Box<dyn FileEqualsChecker>> = file_equals;
-    set_refiners.sort_unstable_by_key(|fec| fec.work_severity());
-    let mut target: HashMap<u128, (Vec<(u128, Vec<HashedFile>)>)> = HashMap::new();
+    let mut set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
+
+    let mut target: HashMap<u128, Vec<(u128, Vec<HashedFile>)>> = HashMap::new();
 
 
     for file_path in files_rev.into_iter() {
-        path_buf.clear();
-        file_path.push_full_to_buf(&mut path_buf);
+        file_path.write_full_to_buf(&mut path_buf);
         let result = place_into_file_set(file_path,&path_buf, &mut path_buf_tmp, &mut set_refiners, |hash| target.entry(hash).or_insert(Vec::new()));
         if let Err(_) = result {
             continue;
@@ -132,63 +143,60 @@ fn main() {
     }
 }
 
-fn produce_list(path: Arc<LinkedPath>, mut file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
+fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
     let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
     while let Some(dir) = dir_list.pop() {
-        path_acc.clear();
-        dir.push_full_to_buf(&mut path_acc);
+        dir.write_full_to_buf(&mut path_acc);
         let Ok(current_dir) = std::fs::read_dir(&path_acc) else { continue; };
         for entry in current_dir {
             let Ok(entry) = entry else { break; };
             let Ok(file_type) = entry.file_type() else { continue; };
             if file_type.is_file() {
                 let file_name = entry.file_name();
-                path_acc.push(file_name);
-                let file_name = LinkedPath(Some(dir.clone()), entry.file_name());
-                let keep_file = if cfg!(windows) {
-                    if let Ok(md) = entry.metadata() {
-                        file_filter.keep_file_md(&file_name, &path_acc, &md)
-                    } else {
-                        false
-                    }
-                } else {
-                    file_filter.keep_file(&file_name, &path_acc)
-                };
+                let pop_token= push_to_path(&mut path_acc, &file_name);
+                let file_name = LinkedPath::new_child(&dir, file_name);
+                let keep_file = file_filter.keep_file_dir_entry(&file_name, pop_token.0, entry);
                 if keep_file {
                     write_target(file_name);
                 }
-                path_acc.pop();
             } else if file_type.is_dir() && recursive {
-                dir_list.push(Arc::new(LinkedPath(Some(dir.clone()), entry.file_name())));
+                dir_list.push(Arc::new(LinkedPath::new_child(&dir, entry.file_name())));
             } else if file_type.is_symlink() && follow_symlink {
                 let entry_name = entry.file_name();
-                path_acc.push(&entry_name);
-                let Ok(metadata) = std::fs::metadata(&path_acc) else {
-                    path_acc.pop();
-                    continue
-                };
-                let entry_name = LinkedPath(Some(dir.clone()), entry_name);
+                let pop_token = push_to_path(&mut path_acc, &entry_name);
+                let Ok(metadata) = std::fs::metadata(&pop_token.0) else { continue };
+                let entry_name = LinkedPath::new_child(&dir, entry_name);
                 if metadata.is_file() {
-                    let keep_file = file_filter.keep_file_md(&entry_name, &path_acc, &metadata);
+                    let keep_file = file_filter.keep_file_md(&entry_name, pop_token.0, &metadata);
                     if keep_file {
                         write_target(entry_name)
                     }
                 } else if metadata.is_dir() && recursive {
                     dir_list.push(Arc::new(entry_name))
                 }
-                path_acc.pop();
             }
         }
     }
+}
+
+struct TemporarySegmentToken<'a>(&'a mut PathBuf);
+impl <'a> Drop for TemporarySegmentToken<'a> {
+    fn drop(&mut self) {
+        self.0.pop();
+    }
+}
+fn push_to_path<'a>(path: &'a mut PathBuf, segment: &OsString) -> TemporarySegmentToken<'a> {
+    path.push(segment);
+    TemporarySegmentToken(path)
 }
 
 fn place_into_file_set<'s, F>(
     file_path: LinkedPath,
     file: &PathBuf,
     tmp_buf: &mut PathBuf,
-    refiners: &mut [Box<dyn FileEqualsChecker>],
+    refiners: &mut FileSetRefiners,
     find_set: F
 ) -> Result<(), AlreadyReportedError>
 where F: FnOnce(u128) -> &'s mut Vec<(u128, Vec<HashedFile>)>{
@@ -205,51 +213,45 @@ where F: FnOnce(u128) -> &'s mut Vec<(u128, Vec<HashedFile>)>{
         }
     };
     let file_hash = hash.digest128();
-    for mut refiner in refiners.iter_mut() {
-        refiner.hash_component(&file, &mut hash)?;
-    }
+    refiners.hash_components(&mut hash, &file)?;
+
     let course_set = find_set(hash.digest128());
+
     if course_set.is_empty() {
         course_set.push((file_hash, vec![HashedFile { file_version_timestamp: modtime, file_path }]));
         return Ok(())
     }
-    
-    'set_loop:
-    for (_, set) in course_set.iter_mut().filter(|(shash, _)| *shash == file_hash) {
-        tmp_buf.clear();
-        let check_against = if let Some(HashedFile { file_path, .. }) = set.first() {
-            file_path
-        } else {
-            set.push(HashedFile { file_version_timestamp: modtime, file_path });
-            break;
-        };
-        check_against.push_full_to_buf(tmp_buf);
-        
-        
-        for refiner in refiners.iter_mut() {
-            let is_equals = match refiner.check_equal(tmp_buf, file) {
-                Ok(result) => result,
-                Err(err) => {
-                    let (first_faulty, second_faulty) = err.is_faulty();
-                    if first_faulty {
-                       set.remove(0);
-                        break;//TODO replace with retry
-                    }
-                    if second_faulty {
-                        return Err(AlreadyReportedError)
-                    }
-                    continue;
-                }
-            };
-            if !is_equals {
-                continue 'set_loop;
-            }
-        }
 
-        set.push(HashedFile { file_version_timestamp: modtime, file_path });
-        break
+    for (_, set) in course_set.iter_mut().filter(|(shash, _)| *shash == file_hash) {
+        let fits = fits_into_file_set(set, file, tmp_buf, refiners)?;
+        if fits {
+            set.push(HashedFile { file_version_timestamp: modtime, file_path });
+            break
+        }
     }
     Ok(())
+}
+
+fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &PathBuf, tmp_buf: &mut PathBuf, refiners: &mut FileSetRefiners) -> Result<bool, AlreadyReportedError>{
+    loop {
+        let Some(HashedFile { file_path: check_against, .. }) = file_set.first() else { return Ok(false) };
+        check_against.write_full_to_buf(tmp_buf);
+
+        let equals_result = refiners.check_equal(tmp_buf, file);
+
+        match equals_result {
+            Ok(is_eq) => return Ok(is_eq),
+            Err(err) => {
+                let (first_faulty, second_faulty) = err.is_faulty();
+                if first_faulty {
+                    file_set.remove(0);
+                }
+                if second_faulty {
+                    return Err(AlreadyReportedError)
+                }
+            }
+        }
+    }
 }
 
 fn hash_file<H: Hasher + Default> (path: impl AsRef<Path>) -> Result<(H, Option<SystemTime>), HashFileError> {

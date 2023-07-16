@@ -7,7 +7,6 @@ mod unix_specific;
 #[cfg(unix)]
 use unix_specific::{get_file_consume_action_simple as gfcas, get_file_equals_arg_simple as gfeas, get_set_order_options as gsoo};
 use crate::file_set_refiner::FileEqualsChecker;
-use crate::set_consumer::FileConsumeAction;
 
 pub struct  SetOrderOption {
     pub name: &'static str,
@@ -27,7 +26,7 @@ macro_rules! simple_component_arg {
     };
 }
 
-simple_component_arg!(SimpleFileConsumeActionArg, FileConsumeAction);
+simple_component_arg!(SimpleFileConsumeActionArg, crate::file_action::FileConsumeAction);
 simple_component_arg!(SimpleFieEqualCheckerArg, FileEqualsChecker);
 
 macro_rules! delegating_impl {

@@ -1,6 +1,6 @@
 
-
-macro_rules! dyn_clone {
+#[macro_export]
+macro_rules! dyn_clone_impl {
     ($dcname: ident, $tname: path) => {
         pub trait $dcname {
             fn dyn_clone(&self) -> Box<dyn $tname>;
@@ -14,4 +14,13 @@ macro_rules! dyn_clone {
     };
 }
 
-dyn_clone!(DynCloneSetOrder, crate::set_order::SetOrder);
+pub trait ChoiceInputReader {
+    fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()>;
+}
+
+impl ChoiceInputReader for std::io::Stdin {
+    fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()> {
+        use std::io::BufRead;
+        self.lock().read_line(buf).map(|_| ())
+    }
+}

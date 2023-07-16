@@ -1,17 +1,18 @@
 mod parse_file_size;
 
-use std::ffi::OsStr;
+
 use std::sync::Arc;
-use clap::{arg, Arg, ArgAction, ArgGroup, Command, Error, value_parser, ValueHint};
-use clap::builder::{PossibleValue, PossibleValuesParser, StringValueParser, TypedValueParser, ValueParser};
-use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
+use clap::builder::{PossibleValue, PossibleValuesParser, ValueParser};
+
+use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
 use crate::file_filters::{FileFilter, FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 
 use crate::LinkedPath;
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
-use crate::set_consumer::{DeleteFileAction, DryRun, FileConsumeAction, FileSetConsumer, InteractiveEachChoice, ReplaceWithHardLinkFileAction, UnconditionalAction};
+use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
 
 pub struct ExecutionPlan {
