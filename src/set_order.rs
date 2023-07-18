@@ -34,9 +34,12 @@ pub struct ModTimeSetOrder(MetadataSetOrder<SystemTime>);
 /// sort set by file creation timestamp
 #[derive(Default, Clone)]
 pub struct CreateTimeSetOrder(MetadataSetOrder<SystemTime>);
+#[derive(Default, Clone)]
+pub struct SymlinkSetOrder(MetadataSetOrder<bool>);
 /// sort set by file name
 #[derive(Default, Clone)]
 pub struct NameAlphabeticSetOrder { sort_buf: Vec<(HashedFile, PathBuf)>, unused_buf: Vec<PathBuf>, reverse: bool }
+
 
 impl NoopSetOrder {
     pub fn new() -> Self { NoopSetOrder }
@@ -66,13 +69,7 @@ impl <F: Ord> MetadataSetOrder<F> {
             file_data.file_path.write_full_to_buf(&mut self.path_buf);
 
             // remove data from set if access error
-            let metadata = handle_file_op!(self.path_buf.metadata(), self.path_buf, continue);
-
-            // abort if file modified
-            if metadata.modified().ok() != file_data.file_version_timestamp {
-                handle_file_modified!(self.path_buf);
-                continue;
-            }
+            let metadata = handle_file_op!(self.path_buf.symlink_metadata(), self.path_buf, continue);
 
             let key = key_extract(metadata)?;
             self.file_buf.push((key, file_data))
@@ -109,6 +106,12 @@ impl SetOrder for CreateTimeSetOrder {
                 AlreadyReportedError
             })
         })
+    }
+}
+
+impl SetOrder for SymlinkSetOrder {
+    fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        self.0.order(files, |md| Ok(md.is_symlink()))
     }
 }
 

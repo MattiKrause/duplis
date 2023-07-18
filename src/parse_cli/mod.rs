@@ -53,17 +53,18 @@ fn assemble_command_info() -> clap::Command {
             .help("set the order in which the elements of equal file sets are ordered; the smallest is considered the original; may contain multiple orderings in decreasing importance; some orderings may be prefixed with r to reverse(example rmodtime)")
             .required(false)
         )
-        .arg(arg!(minfsize: --minsize <SIZE>)
+        .arg(arg!(minfsize: --minsize <SIZE> "Only consider files with >= $minsize bytes")
             .action(ArgAction::Set)
             .required(false)
             .value_parser(ValueParser::from(FileSizeValueParser))
         )
-        .arg(arg!(maxfsize: --maxsize <SIZE>)
+        .arg(arg!(maxfsize: --maxsize <SIZE> "Only consider files with < $maxsize bytes")
             .action(ArgAction::Set)
             .required(false)
             .value_parser(ValueParser::from(FileSizeValueParser))
         )
-        .arg(arg!(nonzerof: -Z --nonzero).action(ArgAction::SetTrue).required(false))
+        .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
+        .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
         .group(ArgGroup::new("action_mode_action").requires("file_action"))
         .group(ArgGroup::new("file_action").requires("action_mode_action"));
     for (name, short, long, help, _) in get_file_consume_action_args(){
@@ -82,7 +83,7 @@ fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
 }
 
 fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder>> {
-    match matches.get_many::<String>("setorder") {
+    let mut order = match matches.get_many::<String>("setorder") {
         Some(options) => {
             let variants = get_set_order_options();
             options.map(|sname| variants.iter().find(|(name, _, _)| name == sname).unwrap().2.dyn_clone()).collect::<Vec<_>>()
@@ -91,7 +92,9 @@ fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder>> {
             let default: Box<dyn SetOrder> = Box::new(ModTimeSetOrder::new(false));
             vec![default]
         }
-    }
+    };
+    order.reverse();
+    order
 }
 
 fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
@@ -169,6 +172,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     };
 
     let recurse = matches.get_flag("recurse");
+    let follow_symlinks = matches.get_flag("followsymlink");
 
     let set_ordering = parse_set_order(&matches);
 
@@ -186,9 +190,9 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         .collect::<Vec<_>>();
 
     let file_set_consumer: Box<dyn FileSetConsumer> = if matches.get_flag("uncond") {
-        Box::new(UnconditionalAction::new(file_action.expect("file action should be present per command config")))
+        Box::new(UnconditionalAction::new(file_action.expect("file action should be present because of command config")))
     } else if matches.get_flag("iact") {
-        Box::new(InteractiveEachChoice::for_console(file_action.expect("file action should be present per command config")))
+        Box::new(InteractiveEachChoice::for_console(file_action.expect("file action should be present because of command config")))
     } else {
         Box::new(DryRun::for_console())
     };
@@ -203,7 +207,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     let plan = ExecutionPlan {
         dirs,
         recursive_dirs,
-        follow_symlinks: false,
+        follow_symlinks,
         file_equals,
         order_set: set_ordering,
         action: file_set_consumer,

@@ -32,6 +32,9 @@ impl FileFilter {
         if !self.filter_name(name, name_path) {
             return false;
         }
+        if self.1.is_empty() {
+            return true
+        }
         let metadata = handle_file_op!(std::fs::metadata(name_path), name_path, return false);
         self.filter_metadata(name, name_path, &metadata)
     }

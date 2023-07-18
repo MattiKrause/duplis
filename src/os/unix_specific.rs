@@ -40,8 +40,9 @@ pub struct ReplaceWithSymlinkFileAction;
 impl FileConsumeAction for ReplaceWithSymlinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
         let original = original.expect("original required");
+        let original = handle_file_op!(std::fs::canonicalize(original), original, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
-        if let Err(err) = std::os::unix::fs::symlink(original, path) {
+        if let Err(err) = std::os::unix::fs::symlink(&original, path) {
             log::error!("FATAL ERROR: failed to create sym link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
             return Err(Recoverable::Fatal(AlreadyReportedError));

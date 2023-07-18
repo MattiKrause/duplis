@@ -28,6 +28,7 @@ use crate::file_set_refiner::{FileSetRefiners};
 
 
 use crate::parse_cli::ExecutionPlan;
+use crate::set_order::SymlinkSetOrder;
 
 pub enum Recoverable<R, F> {
     Recoverable(R), Fatal(F)
@@ -97,7 +98,7 @@ fn main() {
     simplelog::SimpleLogger::init(LevelFilter::Trace, Config::default()).unwrap();
     // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
     let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter } = parse_cli::parse().unwrap();
-
+    order_set.push(Box::new(SymlinkSetOrder::default()));
     let (files_send, files_rev) = flume::unbounded();
 
     for (dir, rec) in dirs.into_iter().map(|d| (d, false)).chain(recursive_dirs.into_iter().map(|d| (d, true))) {
@@ -143,16 +144,38 @@ fn main() {
     }
 }
 
+macro_rules! handle_access_dir {
+    ($result: expr, $dir: expr, $action: expr) => {
+        match $result {
+            Ok(dir) => dir,
+            Err(err) => {
+                log::trace!(target: "find_files", "failed to access directory {}: {err}", $dir.display());
+                $action
+            }
+        }
+    };
+}
+
 fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
     let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
     while let Some(dir) = dir_list.pop() {
         dir.write_full_to_buf(&mut path_acc);
-        let Ok(current_dir) = std::fs::read_dir(&path_acc) else { continue; };
+        let current_dir = handle_access_dir!(std::fs::read_dir(&path_acc), path_acc, continue);
         for entry in current_dir {
-            let Ok(entry) = entry else { break; };
-            let Ok(file_type) = entry.file_type() else { continue; };
+            let entry = handle_access_dir!(entry, path_acc, break);
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(err) => {
+                    if log::log_enabled!(log::Level::Trace) {
+                        path_acc.push(entry.file_name());
+                        log::trace!(target: "find_files", "failed to access {}: {err}", path_acc.display());
+                        path_acc.pop();
+                    }
+                    continue;
+                }
+            };
             if file_type.is_file() {
                 let file_name = entry.file_name();
                 let pop_token= push_to_path(&mut path_acc, &file_name);
@@ -166,7 +189,13 @@ fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: 
             } else if file_type.is_symlink() && follow_symlink {
                 let entry_name = entry.file_name();
                 let pop_token = push_to_path(&mut path_acc, &entry_name);
-                let Ok(metadata) = std::fs::metadata(&pop_token.0) else { continue };
+                let metadata = match std::fs::metadata(&pop_token.0) {
+                    Ok(md) => md,
+                    Err(err) => {
+                        log::trace!("failed to follow symlink {}: {err}", pop_token.0.display());
+                        continue;
+                    }
+                };
                 let entry_name = LinkedPath::new_child(&dir, entry_name);
                 if metadata.is_file() {
                     let keep_file = file_filter.keep_file_md(&entry_name, pop_token.0, &metadata);
@@ -259,7 +288,7 @@ fn hash_file<H: Hasher + Default> (path: impl AsRef<Path>) -> Result<(H, Option<
     let mut file = std::fs::OpenOptions::new().read(true).write(false).open(path.as_ref())?;
     let metadata = file.metadata()?;
     let before_mod_time = metadata.modified().ok();// might be unavailable on the platform
-    let mut buf = Box::new([0; 256]);
+    let mut buf = Box::new([0; 512]);
     hash_source(&mut buf, &mut hash, &mut file)?;
     let metadata = file.metadata()?;
     let after_mod_time = metadata.modified().ok();
@@ -271,7 +300,7 @@ fn hash_file<H: Hasher + Default> (path: impl AsRef<Path>) -> Result<(H, Option<
     }
 }
 
-fn hash_source<H: std::hash::Hasher>(buf: &mut Box<[u8; 256]>, hash: &mut H,mut file: impl std::io::Read) -> std::io::Result<()> {
+fn hash_source<H: std::hash::Hasher>(buf: &mut Box<[u8; 512]>, hash: &mut H,mut file: impl std::io::Read) -> std::io::Result<()> {
     while let Some(bytes_read) = Some(file.read(buf.as_mut_slice())?).filter(|amount| *amount != 0) {
         hash.write(&buf[..bytes_read]);
     }
