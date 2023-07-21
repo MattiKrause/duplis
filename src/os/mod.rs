@@ -21,7 +21,7 @@ macro_rules! simple_component_arg {
             pub short: char,
             pub long: &'static str,
             pub help: String,
-            pub action: Box<dyn $cname>
+            pub action: Box<dyn $cname + Send>
         }
     };
 }

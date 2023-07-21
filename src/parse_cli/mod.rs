@@ -1,6 +1,8 @@
 mod parse_file_size;
 
 
+use std::ffi::OsString;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
 use clap::builder::{PossibleValue, PossibleValuesParser, ValueParser};
@@ -19,10 +21,11 @@ pub struct ExecutionPlan {
     pub dirs: Vec<Arc<LinkedPath>>,
     pub recursive_dirs: Vec<Arc<LinkedPath>>,
     pub follow_symlinks: bool,
-    pub file_equals: Vec<Box<dyn FileEqualsChecker>>,
-    pub order_set: Vec<Box<dyn SetOrder>>,
+    pub file_equals: Vec<Box<dyn FileEqualsChecker + Send>>,
+    pub order_set: Vec<Box<dyn SetOrder + Send>>,
     pub action: Box<dyn FileSetConsumer>,
-    pub file_filter: FileFilter
+    pub file_filter: FileFilter,
+    pub num_threads: NonZeroU32
 }
 
 fn assemble_command_info() -> clap::Command {
@@ -65,6 +68,7 @@ fn assemble_command_info() -> clap::Command {
         )
         .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
         .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
+        .arg(arg!(numthreads: -t -threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
         .group(ArgGroup::new("action_mode_action").requires("file_action"))
         .group(ArgGroup::new("file_action").requires("action_mode_action"));
     for (name, short, long, help, _) in get_file_consume_action_args(){
@@ -82,14 +86,14 @@ fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
         .unwrap_or_else(|| vec![LinkedPath::root(".")])
 }
 
-fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder>> {
+fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder + Send>> {
     let mut order = match matches.get_many::<String>("setorder") {
         Some(options) => {
             let variants = get_set_order_options();
             options.map(|sname| variants.iter().find(|(name, _, _)| name == sname).unwrap().2.dyn_clone()).collect::<Vec<_>>()
         }
         None => {
-            let default: Box<dyn SetOrder> = Box::new(ModTimeSetOrder::new(false));
+            let default: Box<dyn SetOrder + Send> = Box::new(ModTimeSetOrder::new(false));
             vec![default]
         }
     };
@@ -116,8 +120,8 @@ fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
     default_order_options.chain(os_options).collect::<Vec<_>>()
 }
 
-fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileConsumeAction>)> {
-    let mut default: Vec<(_, _, _, _, Box<dyn FileConsumeAction>)> = vec![
+fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileConsumeAction + Send>)> {
+    let mut default: Vec<(_, _, _, _, Box<dyn FileConsumeAction + Send>)> = vec![
         ("isdel", 'd', "delete", String::from("Delete duplicated files"), Box::new(DeleteFileAction::default())),
         ("rehl", 'l', "rehardlink", String::from("Replace duplicated files with a hard link"), Box::new(ReplaceWithHardLinkFileAction::default())),
     ];
@@ -128,8 +132,8 @@ fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, Stri
     default
 }
 
-fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker>)>{
-    let mut default: Vec<(_, _, _, _, Box<dyn FileEqualsChecker>)> = vec![
+fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker + Send>)>{
+    let mut default: Vec<(_, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
         ("contenteq", 'c', "contenteq", String::from("compare files byte-by-byte"), Box::new(FileContentEquals::default()))
     ];
     let os_specific = crate::os::get_file_equals_simple()
@@ -171,12 +175,20 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         FileFilter(Box::new([]), metadata_filter.into_boxed_slice())
     };
 
+    let num_threads = match matches.get_one::<u32>("numthreads") {
+        Some(0) => {
+            u32::try_from(std::thread::available_parallelism().map_or(1, NonZeroUsize::get).saturating_mul(2)).unwrap_or(u32::MAX)
+        },
+        Some(num) => *num,
+        None => 1
+    };
+
     let recurse = matches.get_flag("recurse");
     let follow_symlinks = matches.get_flag("followsymlink");
 
     let set_ordering = parse_set_order(&matches);
 
-    let file_action: Option<Box<dyn FileConsumeAction>> = get_file_consume_action_args()
+    let file_action: Option<Box<dyn FileConsumeAction + Send>> = get_file_consume_action_args()
         .into_iter()
         .map(|(name, _, _, _, i)| (name, i))
         .find(|(name, _)| matches.get_flag(name))
@@ -212,6 +224,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         order_set: set_ordering,
         action: file_set_consumer,
         file_filter,
+        num_threads: NonZeroU32::new(num_threads).unwrap(),
     };
     Ok(plan)
 }

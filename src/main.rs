@@ -13,12 +13,13 @@ mod file_action;
 
 use std::collections::HashMap;
 use std::ffi::{OsString};
-use std::hash::{Hasher};
+use std::ops::DerefMut;
 
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+use dashmap::DashMap;
 
 use log::LevelFilter;
 use simplelog::{Config};
@@ -31,7 +32,8 @@ use crate::parse_cli::ExecutionPlan;
 use crate::set_order::SymlinkSetOrder;
 
 pub enum Recoverable<R, F> {
-    Recoverable(R), Fatal(F)
+    Recoverable(R),
+    Fatal(F),
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +73,7 @@ impl LinkedPath {
         path_buf
     }
 
-    fn from_path_buf(buf: &PathBuf) -> Arc<Self>  {
+    fn from_path_buf(buf: &PathBuf) -> Arc<Self> {
         buf.iter().map(ToOwned::to_owned)
             .fold(None, |acc, res| Some(Arc::new(LinkedPath(acc, res))))
             .expect("empty path")
@@ -91,41 +93,50 @@ pub struct HashedFile {
 pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
-    // shared-imm-state: Regex etc.
-    // work queue: 1 Thread -> one working thread
-    // single ui responsive
-
     simplelog::SimpleLogger::init(LevelFilter::Trace, Config::default()).unwrap();
-    // find file -> hash file -> lookup hash in hashmap -> equals check? -> confirm? -> needs accumulate(i.e. for sort)? -> execute action
-    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter } = parse_cli::parse().unwrap();
-    order_set.push(Box::new(SymlinkSetOrder::default()));
-    let (files_send, files_rev) = flume::unbounded();
 
-    for (dir, rec) in dirs.into_iter().map(|d| (d, false)).chain(recursive_dirs.into_iter().map(|d| (d, true))) {
-        produce_list(dir, &mut file_filter, rec, follow_symlinks, |file| {
-            files_send.send(file).expect("sink leads to nowhere; this should not happen")
-        });
-    }
-
-    drop(files_send);
-
-
-    let mut path_buf = PathBuf::new();
-    let mut path_buf_tmp = PathBuf::new();
+    // the data required to run the program
+    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter, num_threads } = parse_cli::parse().unwrap();
     let mut set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
+    order_set.push(Box::new(SymlinkSetOrder::default()));
+    // if don't thread we want essentially a list, if we thread, there is no harm in keeping then backlog in check
+    let (files_send, files_rev): (flume::Sender<LinkedPath>, _) = if num_threads.get() > 1 { flume::bounded(128) } else { flume::unbounded() };
+    let mut target: DashMap<u128, Vec<(u128, Vec<HashedFile>)>> = DashMap::new();
 
-    let mut target: HashMap<u128, Vec<(u128, Vec<HashedFile>)>> = HashMap::new();
-
-
-    for file_path in files_rev.into_iter() {
-        file_path.write_full_to_buf(&mut path_buf);
-        let result = place_into_file_set(file_path,&path_buf, &mut path_buf_tmp, &mut set_refiners, |hash| target.entry(hash).or_insert(Vec::new()));
-        if let Err(_) = result {
-            continue;
+    std::thread::scope(|s| {
+        if num_threads.get() > 1 {
+            // spawn n - 1 threads, if is for clarity
+            for t in 1..num_threads.get() {
+                let mut set_refiners = set_refiners.clone();
+                let files_rev = files_rev.clone();
+                let thread = std::thread::Builder::new()
+                    .name(format!("file_hash_worker_{t}"))
+                    .spawn_scoped(s, || place_files_to_set(set_refiners, files_rev, &target));
+                if let Err(err) = thread {
+                    log::error!("threading not supported on this platform; please do not use the threading option({err})");
+                    return;
+                }
+            }
         }
-    }
+        for dir in dirs {
+            find_files(dir, &mut file_filter, false, follow_symlinks, |file| {
+                files_send.send(file).expect("sink leads to nowhere; this should not happen")
+            });
+        }
 
-    for mut set in target.into_values().flat_map(|sets| sets.into_iter()){
+        for dir in recursive_dirs {
+            find_files(dir, &mut file_filter, true, follow_symlinks, |file| {
+                files_send.send(file).expect("sink leads to nowhere; this should not happen")
+            });
+        }
+
+        drop(files_send);
+
+        if num_threads.get() == 1 {
+            place_files_to_set(set_refiners, files_rev, &target);
+        }
+    });
+    for mut set in target.into_iter().map(|(_, v)| v).flat_map(|sets| sets.into_iter()) {
         if set.1.len() <= 1 {
             continue;
         }
@@ -139,7 +150,7 @@ fn main() {
         }
 
         if let Err(_) = file_set_action.consume_set(set.1) {
-            break
+            break;
         };
     }
 }
@@ -156,7 +167,8 @@ macro_rules! handle_access_dir {
     };
 }
 
-fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
+// find all files that need to be handled
+fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
     let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
@@ -178,7 +190,7 @@ fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: 
             };
             if file_type.is_file() {
                 let file_name = entry.file_name();
-                let pop_token= push_to_path(&mut path_acc, &file_name);
+                let pop_token = push_to_path(&mut path_acc, &file_name);
                 let file_name = LinkedPath::new_child(&dir, file_name);
                 let keep_file = file_filter.keep_file_dir_entry(&file_name, pop_token.0, entry);
                 if keep_file {
@@ -210,60 +222,78 @@ fn produce_list(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: 
     }
 }
 
+fn place_files_to_set(mut set_refiners: FileSetRefiners, files: flume::Receiver<LinkedPath>, target: &DashMap<u128, Vec<(u128, Vec<HashedFile>)>>) {
+    let mut path_buf = PathBuf::new();
+    let mut path_buf_tmp = PathBuf::new();
+
+    for file_path in files.into_iter() {
+        file_path.write_full_to_buf(&mut path_buf);
+        let result = place_into_file_set(file_path, &path_buf, &mut path_buf_tmp, &mut set_refiners, |hash| target.entry(hash).or_insert(Vec::new()));
+        if let Err(_) = result {
+            continue;
+        }
+    }
+}
+
+/// Used to temporarily append a segment to a path, while guaranteeing, that that segment is popped off again
 struct TemporarySegmentToken<'a>(&'a mut PathBuf);
-impl <'a> Drop for TemporarySegmentToken<'a> {
+
+impl<'a> Drop for TemporarySegmentToken<'a> {
     fn drop(&mut self) {
         self.0.pop();
     }
 }
+
 fn push_to_path<'a>(path: &'a mut PathBuf, segment: &OsString) -> TemporarySegmentToken<'a> {
     path.push(segment);
     TemporarySegmentToken(path)
 }
 
-fn place_into_file_set<'s, F>(
+fn place_into_file_set<'s, R, F>(
     file_path: LinkedPath,
     file: &PathBuf,
     tmp_buf: &mut PathBuf,
     refiners: &mut FileSetRefiners,
-    find_set: F
+    find_set: F,
 ) -> Result<(), AlreadyReportedError>
-where F: FnOnce(u128) -> &'s mut Vec<(u128, Vec<HashedFile>)>{
+    where R: DerefMut<Target=Vec<(u128, Vec<HashedFile>)>>, F: FnOnce(u128) -> R {
     let hash = hash_file::<xxhash_rust::xxh3::Xxh3>(&file);
     let (mut hash, modtime) = match hash {
         Ok(value) => value,
         Err(HashFileError::FileChanged) => {
             handle_file_modified!(file);
-            return Err(AlreadyReportedError)
-        },
+            return Err(AlreadyReportedError);
+        }
         Err(HashFileError::IO(err)) => {
             handle_file_error!(file, err);
-            return Err(AlreadyReportedError)
+            return Err(AlreadyReportedError);
         }
     };
     let file_hash = hash.digest128();
     refiners.hash_components(&mut hash, &file)?;
 
-    let course_set = find_set(hash.digest128());
+    let mut course_set = find_set(hash.digest128());
+    let course_set = course_set.deref_mut();
 
+    // we have created an new course set, thus there is nothing to compare this file to
     if course_set.is_empty() {
         course_set.push((file_hash, vec![HashedFile { file_version_timestamp: modtime, file_path }]));
-        return Ok(())
+        return Ok(());
     }
 
     for (_, set) in course_set.iter_mut().filter(|(shash, _)| *shash == file_hash) {
         let fits = fits_into_file_set(set, file, tmp_buf, refiners)?;
         if fits {
             set.push(HashedFile { file_version_timestamp: modtime, file_path });
-            break
+            break;
         }
     }
     Ok(())
 }
 
-fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &PathBuf, tmp_buf: &mut PathBuf, refiners: &mut FileSetRefiners) -> Result<bool, AlreadyReportedError>{
+fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &PathBuf, tmp_buf: &mut PathBuf, refiners: &mut FileSetRefiners) -> Result<bool, AlreadyReportedError> {
     loop {
-        let Some(HashedFile { file_path: check_against, .. }) = file_set.first() else { return Ok(false) };
+        let Some(HashedFile { file_path: check_against, .. }) = file_set.first() else { return Ok(false); };
         check_against.write_full_to_buf(tmp_buf);
 
         let equals_result = refiners.check_equal(tmp_buf, file);
@@ -276,14 +306,14 @@ fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &PathBuf, tmp_buf: &
                     file_set.remove(0);
                 }
                 if second_faulty {
-                    return Err(AlreadyReportedError)
+                    return Err(AlreadyReportedError);
                 }
             }
         }
     }
 }
 
-fn hash_file<H: Hasher + Default> (path: impl AsRef<Path>) -> Result<(H, Option<SystemTime>), HashFileError> {
+fn hash_file<H: std::hash::Hasher + Default>(path: impl AsRef<Path>) -> Result<(H, Option<SystemTime>), HashFileError> {
     let mut hash = H::default();
     let mut file = std::fs::OpenOptions::new().read(true).write(false).open(path.as_ref())?;
     let metadata = file.metadata()?;
@@ -300,7 +330,7 @@ fn hash_file<H: Hasher + Default> (path: impl AsRef<Path>) -> Result<(H, Option<
     }
 }
 
-fn hash_source<H: std::hash::Hasher>(buf: &mut Box<[u8; 512]>, hash: &mut H,mut file: impl std::io::Read) -> std::io::Result<()> {
+fn hash_source<H: std::hash::Hasher>(buf: &mut Box<[u8; 512]>, hash: &mut H, mut file: impl std::io::Read) -> std::io::Result<()> {
     while let Some(bytes_read) = Some(file.read(buf.as_mut_slice())?).filter(|amount| *amount != 0) {
         hash.write(&buf[..bytes_read]);
     }

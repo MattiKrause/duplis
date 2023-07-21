@@ -2,12 +2,12 @@ use std::io::Read;
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use crate::error_handling::AlreadyReportedError;
-use crate::handle_file_op;
+use crate::{dyn_clone_impl, handle_file_op};
 
-pub struct FileSetRefiners(Box<[Box<dyn FileEqualsChecker>]>);
+pub struct FileSetRefiners(Box<[Box<dyn FileEqualsChecker + Send>]>);
 
 impl FileSetRefiners {
-    pub fn new(mut checkers: Box<[Box<dyn FileEqualsChecker>]>) -> Self {
+    pub fn new(mut checkers: Box<[Box<dyn FileEqualsChecker + Send>]>) -> Self {
         checkers.sort_unstable_by_key(|fec| fec.work_severity());
         Self(checkers)
     }
@@ -24,6 +24,13 @@ impl FileSetRefiners {
             refiner.check_equal(a, b)?;
         }
         Ok(true)
+    }
+}
+
+impl Clone for FileSetRefiners {
+    fn clone(&self) -> Self {
+        let cks = self.0.iter().map(|ck| ck.dyn_clone()).collect::<Vec<_>>();
+        Self(cks.into_boxed_slice())
     }
 }
 
@@ -59,12 +66,14 @@ pub enum FileWork {
 }
 
 /// checks whether to files are equal
-pub trait FileEqualsChecker {
+pub trait FileEqualsChecker: FileEqualsCheckDynClone {
     fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError>;
     /// hash the property were checking for(like the permissions), may be a noop if property cannot be hashed.
     fn hash_component(&mut self, f: &PathBuf, hasher:  &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>;
     fn work_severity(&self) -> FileWork;
 }
+
+dyn_clone_impl!(FileEqualsCheckDynClone, FileEqualsChecker);
 
 #[derive(Clone)]
 pub struct FileContentEquals {
