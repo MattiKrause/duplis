@@ -1,8 +1,9 @@
-use std::path::{PathBuf};
-use crate::{HashedFile, Recoverable};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use crate::{handle_file_op, HashedFile, Recoverable};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_action::FileConsumeAction;
-use crate::util::ChoiceInputReader;
+use crate::util::{ChoiceInputReader, path_contains_comma};
 
 pub trait FileSetConsumer {
     /// first element of set is the 'original'
@@ -39,8 +40,8 @@ pub struct DryRun<W> {
     write: W,
 }
 
-
-
+pub struct MachineReadableEach<W> { written_before: bool, writer: W, path_bufs: (PathBuf, PathBuf) }
+pub struct MachineReadableSet<W> { written_before: bool, writer: W, path_bufs: (PathBuf, PathBuf) }
 
 impl Default for DryRun<std::io::Stdout> {
     fn default() -> Self {
@@ -163,7 +164,7 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 } else if choice.eq_ignore_ascii_case("n") | choice.eq_ignore_ascii_case("no") {
                     break false;
                 } else {
-                    println!("unrecognised answer; only y(es) and n(o) are accepted");
+                    write!(self.write, "unrecognised answer; only y(es) and n(o) are accepted").map_err(out_err_map!())?;
                 }
             };
 
@@ -176,4 +177,96 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
         }
         Ok(())
     }
+}
+
+impl <W: std::io::Write> MachineReadableEach<W> {
+    pub fn new(writer: W) -> Self {
+        Self { written_before: false, writer,path_bufs: (PathBuf::new(), PathBuf::new()) }
+    }
+}
+
+impl MachineReadableEach<std::io::Stdout> {
+    pub fn for_console() -> Self {
+        Self::new(std::io::stdout())
+    }
+}
+
+impl <W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
+    fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        let (orig_path, tmp_path) = &mut self.path_bufs;
+        let Some(orig_path) = find_nocomma_original(&mut set, orig_path) else { return Ok(()) };
+        for file in &set[1..] {
+            file.file_path.write_full_to_buf(tmp_path);
+
+            let tmp_path = handle_file_op!(std::fs::canonicalize(&*tmp_path), tmp_path, continue);
+            if path_contains_comma(&tmp_path) {
+                warn_path_contains_comma(&tmp_path);
+                continue;
+            }
+            if self.written_before {
+                writeln!(self.writer).map_err(out_err_map!())?;
+            }
+            write!(self.writer, "{},{}", orig_path.display(), tmp_path.display()).map_err(out_err_map!())?;
+            self.written_before = true;
+        }
+
+        Ok(())
+    }
+}
+
+impl <W: std::io::Write> MachineReadableSet<W> {
+    pub fn new(writer: W) -> Self {
+        Self { written_before: false, writer, path_bufs: (PathBuf::new(), PathBuf::new()) }
+    }
+}
+
+impl MachineReadableSet<std::io::Stdout> {
+    pub fn for_console() -> Self {
+        Self::new(std::io::stdout())
+    }
+}
+
+impl <W: std::io::Write> FileSetConsumer for MachineReadableSet<W> {
+    fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        let (orig_path, tmp_path) = &mut self.path_bufs;
+        let mut first = true;
+        let Some(orig_path) = find_nocomma_original(&mut set, orig_path) else { return Ok(()) };
+        if self.written_before {
+            writeln!(self.writer).map_err(out_err_map!())?;
+        }
+        for file in &set[1..] {
+            file.file_path.write_full_to_buf(tmp_path);
+            let tmp_path = handle_file_op!(tmp_path.canonicalize(), tmp_path, continue);
+            if path_contains_comma(&tmp_path) {
+                warn_path_contains_comma(&tmp_path);
+                continue;
+            }
+            let empty_path = PathBuf::new();
+            let prev_path = if first { &orig_path } else { &empty_path };
+            write!(self.writer, "{},{}", prev_path.display(), tmp_path.display()).map_err(out_err_map!())?;
+            first = false;
+            self.written_before = true;
+        }
+        Ok(())
+    }
+}
+
+fn find_nocomma_original(set: &mut Vec<HashedFile>, orig_path: &mut PathBuf) -> Option<PathBuf> {
+    let buf = loop {
+        let Some(first) = set.get(0) else { return None };
+        first.file_path.write_full_to_buf(orig_path);
+        let orig_path = handle_file_op!(orig_path.canonicalize(), orig_path, {set.remove(0); continue});
+        if path_contains_comma(&orig_path) {
+            warn_path_contains_comma(&orig_path);
+            set.remove(0);
+            continue
+        }
+
+        break orig_path
+    };
+    Some(buf)
+}
+
+fn warn_path_contains_comma(path: &Path) {
+    log::warn!("path {} contains a ',' and cannot be written in machine readable format", path.display());
 }

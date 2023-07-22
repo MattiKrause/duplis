@@ -30,14 +30,13 @@ use crate::file_set_refiner::{FileSetRefiners};
 
 use crate::parse_cli::ExecutionPlan;
 use crate::set_order::SymlinkSetOrder;
+use crate::util::LinkedPath;
 
 pub enum Recoverable<R, F> {
     Recoverable(R),
     Fatal(F),
 }
 
-#[derive(Clone, Debug)]
-pub struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
 
 enum HashFileError {
     IO(std::io::Error),
@@ -50,39 +49,7 @@ impl From<std::io::Error> for HashFileError {
     }
 }
 
-impl LinkedPath {
-    fn new_child(parent: &Arc<LinkedPath>, segment: OsString) -> Self {
-        Self(Some(parent.clone()), segment)
-    }
 
-    fn write_full_to_buf(&self, buf: &mut PathBuf) {
-        buf.clear();
-        self._push_full_to_buf(buf);
-    }
-
-    fn _push_full_to_buf(&self, buf: &mut PathBuf) {
-        if let Some(ancestor) = &self.0 {
-            ancestor._push_full_to_buf(buf);
-        }
-        buf.push(&self.1);
-    }
-
-    fn to_push_buf(&self) -> PathBuf {
-        let mut path_buf = PathBuf::new();
-        self._push_full_to_buf(&mut path_buf);
-        path_buf
-    }
-
-    fn from_path_buf(buf: &PathBuf) -> Arc<Self> {
-        buf.iter().map(ToOwned::to_owned)
-            .fold(None, |acc, res| Some(Arc::new(LinkedPath(acc, res))))
-            .expect("empty path")
-    }
-
-    fn root(dir: &str) -> Arc<Self> {
-        Arc::new(Self(None, OsString::from(dir)))
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct HashedFile {
@@ -97,17 +64,17 @@ fn main() {
 
     // the data required to run the program
     let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter, num_threads } = parse_cli::parse().unwrap();
-    let mut set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
+    let set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
     order_set.push(Box::new(SymlinkSetOrder::default()));
     // if don't thread we want essentially a list, if we thread, there is no harm in keeping then backlog in check
     let (files_send, files_rev): (flume::Sender<LinkedPath>, _) = if num_threads.get() > 1 { flume::bounded(128) } else { flume::unbounded() };
-    let mut target: DashMap<u128, Vec<(u128, Vec<HashedFile>)>> = DashMap::new();
+    let target: DashMap<u128, Vec<(u128, Vec<HashedFile>)>> = DashMap::new();
 
     std::thread::scope(|s| {
         if num_threads.get() > 1 {
             // spawn n - 1 threads, if is for clarity
             for t in 1..num_threads.get() {
-                let mut set_refiners = set_refiners.clone();
+                let set_refiners = set_refiners.clone();
                 let files_rev = files_rev.clone();
                 let thread = std::thread::Builder::new()
                     .name(format!("file_hash_worker_{t}"))

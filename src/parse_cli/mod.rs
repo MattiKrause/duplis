@@ -5,17 +5,17 @@ use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
-use clap::builder::{PossibleValue, PossibleValuesParser, ValueParser};
+use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, ValueParser};
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
 use crate::file_filters::{FileFilter, FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 
-use crate::LinkedPath;
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
-use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, UnconditionalAction};
+use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
+use crate::util::LinkedPath;
 
 pub struct ExecutionPlan {
     pub dirs: Vec<Arc<LinkedPath>>,
@@ -28,6 +28,10 @@ pub struct ExecutionPlan {
     pub num_threads: NonZeroU32
 }
 
+const ACTION_MODE_GROUP: &str = "action_mode";
+const ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
+const FILE_ACTION_GROUP: &str = "file_action";
+
 fn assemble_command_info() -> clap::Command {
     let mut command = clap::Command::new("rrem_fast")
         .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates")
@@ -38,13 +42,24 @@ fn assemble_command_info() -> clap::Command {
         )
         .arg(arg!(uncond: -u --immediate "Execute the specified action without asking")
             .action(ArgAction::SetTrue)
-            .group("action_mode")
-            .group("action_mode_action")
+            .group(ACTION_MODE_GROUP)
+            .group(ACTION_MODE_ACTION_GROUP)
         )
         .arg(arg!(iact: -i --interactive "Execute the specified action after confirmation on the console")
             .action(ArgAction::SetTrue)
-            .group("action_mode")
-            .group("action_mode_action")
+            .group(ACTION_MODE_GROUP)
+            .group(ACTION_MODE_ACTION_GROUP)
+        )
+        .arg(arg!(machine_readable: --wout "Write all duplicates pairwise to stdout")
+            .value_parser([
+                PossibleValue::new("pairwise").help("print duplicates in format $original,$duplicate\\n"),
+                PossibleValue::new("setwise").help("print entire duplicate sets, with set members separated by comma and sets separated by \\n")
+            ])
+            .require_equals(true)
+             .num_args(0..=1)
+            .action(ArgAction::Set)
+            .default_missing_value(OsStr::from("pairwise"))
+            .group(ACTION_MODE_GROUP)
         )
         .arg(arg!(recurse: -r --recurse "search all listed directories recursively")
             .action(ArgAction::SetTrue)
@@ -69,10 +84,10 @@ fn assemble_command_info() -> clap::Command {
         .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
         .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
         .arg(arg!(numthreads: -t -threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
-        .group(ArgGroup::new("action_mode_action").requires("file_action"))
-        .group(ArgGroup::new("file_action").requires("action_mode_action"));
+        .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
+        .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP));
     for (name, short, long, help, _) in get_file_consume_action_args(){
-        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group("file_action"));
+        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group(FILE_ACTION_GROUP));
     }
     for (name, short, long, help, _) in get_file_equals_args() {
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue))
@@ -205,7 +220,13 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         Box::new(UnconditionalAction::new(file_action.expect("file action should be present because of command config")))
     } else if matches.get_flag("iact") {
         Box::new(InteractiveEachChoice::for_console(file_action.expect("file action should be present because of command config")))
-    } else {
+    } else if let Some(kind) = matches.get_one::<String>("machine_readable") {
+        match kind.as_str() {
+            "pairwise" => Box::new(MachineReadableEach::for_console()),
+            "setwise" => Box::new(MachineReadableSet::for_console()),
+            _ => panic!("invalid maschine-reable-out config {kind}")
+        }
+    }else {
         Box::new(DryRun::for_console())
     };
 

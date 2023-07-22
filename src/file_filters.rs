@@ -1,7 +1,8 @@
 use std::fs::Metadata;
 use std::ops::DerefMut;
 use std::path::Path;
-use crate::{handle_file_op, LinkedPath};
+use crate::{handle_file_op};
+use crate::util::LinkedPath;
 
 pub struct FileFilter(pub Box<[Box<dyn FileNameFilter>]>, pub Box<[Box<dyn FileMetadataFilter>]>);
 
