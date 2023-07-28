@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::ops::DerefMut;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::error_handling::AlreadyReportedError;
 use crate::{dyn_clone_impl, handle_file_op};
 
@@ -34,6 +34,7 @@ impl Clone for FileSetRefiners {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum CheckEqualsError {
     FirstFaulty, SecondFaulty, BothFaulty
 }
@@ -67,9 +68,9 @@ pub enum FileWork {
 
 /// checks whether to files are equal
 pub trait FileEqualsChecker: FileEqualsCheckDynClone {
-    fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError>;
+    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsError>;
     /// hash the property were checking for(like the permissions), may be a noop if property cannot be hashed.
-    fn hash_component(&mut self, f: &PathBuf, hasher:  &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>;
+    fn hash_component(&mut self, f: &Path, hasher:  &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>;
     fn work_severity(&self) -> FileWork;
 }
 
@@ -91,7 +92,7 @@ impl FileContentEquals {
 }
 
 impl FileEqualsChecker for FileContentEquals{
-    fn check_equal(&mut self, a_path: &PathBuf, b_path: &PathBuf) -> Result<bool, CheckEqualsError>{
+    fn check_equal(&mut self, a_path: &Path, b_path: &Path) -> Result<bool, CheckEqualsError>{
         let (buf_a, buf_b) = self.buf.deref_mut();
 
         let mut a = handle_file_op!(std::fs::File::open(a_path), a_path, return Err(CheckEqualsError::FirstFaulty));
@@ -116,7 +117,7 @@ impl FileEqualsChecker for FileContentEquals{
         }
     }
 
-    fn hash_component(&mut self, _a: &PathBuf, _hasher: &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>{ Ok(()) }
+    fn hash_component(&mut self, _a: &Path, _hasher: &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>{ Ok(()) }
 
     fn work_severity(&self) -> FileWork {
         FileWork::FileContentWork

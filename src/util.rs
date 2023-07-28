@@ -84,6 +84,6 @@ pub fn path_contains_comma(path: &Path) -> bool {
     };
     #[cfg(not(unix))]
     return {
-        path.as_os_str().to_string_lossy().contains(b',')
+        path.as_os_str().to_string_lossy().contains(',')
     }
 }

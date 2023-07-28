@@ -91,23 +91,37 @@ impl Drop for ExpectingConsumeAction {
     }
 }
 
-struct CommonPrefix(&'static str, u64);
+pub struct CommonPrefix(&'static str, u64, Vec<PathBuf>);
 impl CommonPrefix {
-    fn create_file(&self, path: &str, content: &[u8]) -> CreateFileRet {
-        create_file(&format!("{}{path}", self.0), content)
+    pub fn new(prefix: &'static str) -> Self {
+        Self(prefix, 0, vec![])
     }
-    fn create_file_auto(&mut self, content: &[u8]) -> CreateFileRet {
+    pub fn create_file(&mut self, path: &str, content: &[u8]) -> CreateFileRet {
+        let path = PathBuf::from(&format!("{}{path}", self.0));
+        let result = create_file(&path, content);
+        self.2.push(path);
+        return result
+    }
+    pub fn create_file_auto(&mut self, content: &[u8]) -> CreateFileRet {
         self.1 += 1;
         self.create_file(&format!("{}", self.1), content)
     }
-    fn make_file_auto(&mut self) -> CreateFileRet {
+    pub fn make_file_auto(&mut self) -> CreateFileRet {
         self.create_file_auto(&[])
+    }
+}
+
+impl Drop for CommonPrefix {
+    fn drop(&mut self) {
+        for file in &self.2 {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }
 
 #[test]
 fn test_ordering() {
-    let mut prefix = CommonPrefix("ordering_", 0);
+    let mut prefix = CommonPrefix::new("ordering_");
     let file1 = prefix.create_file("first", &[]);
     sleep(Duration::from_millis(50));
     let mut file2 = prefix.create_file("2", &[]);
@@ -141,7 +155,7 @@ fn test_ordering() {
 
 #[test]
 fn test_file_filter() {
-    let mut prefix = CommonPrefix("file_filter_", 0);
+    let mut prefix = CommonPrefix::new("file_filter_");
     let file0 = prefix.create_file_auto(b"");
     let file1 = prefix.create_file_auto(b"b");
     let file2 = prefix.create_file_auto(b"bb");
@@ -186,14 +200,14 @@ fn test_deleted_original(prefix: &mut CommonPrefix, mut consumer: impl FileSetCo
 
 #[test]
 fn test_unconditional_set_consumer() {
-    let mut prefix = CommonPrefix("uncond_set_consumer", 0);
+    let mut prefix = CommonPrefix::new("uncond_set_consumer");
     test_deleted_original(&mut prefix, UnconditionalAction::new(Box::new(UnreachableFileConsumer)));
 }
 
 #[test]
 fn test_machine_readable_each() {
-    let mut prefix = CommonPrefix("m_read_each_", 0);
-    let mut empty_write: &mut [u8] = [].as_mut_slice();
+    let mut prefix = CommonPrefix::new("m_read_each_");
+    let empty_write: &mut [u8] = [].as_mut_slice();
 
     test_deleted_original(&mut prefix, MachineReadableEach::new(empty_write));
 
@@ -234,7 +248,7 @@ fn test_machine_readable_each() {
 
 #[test]
 fn test_machine_readable_set() {
-    let mut prefix = CommonPrefix("m_read_set_", 0);
+    let mut prefix = CommonPrefix::new("m_read_set_");
     let mut target: Vec<u8> = Vec::new();
 
     test_deleted_original(&mut prefix, MachineReadableSet::new(&mut target));
@@ -275,7 +289,7 @@ fn test_machine_readable_set() {
 
 #[test]
 fn test_interactive_set_action() {
-    let mut prefix = CommonPrefix("interactive_set_action", 0);
+    let mut prefix = CommonPrefix::new("interactive_set_action");
 
     let mut empty_write_buf: [u8; 0] = [];
     let empty_read_buf: [u8; 0] = [];

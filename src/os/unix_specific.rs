@@ -1,10 +1,12 @@
 use std::borrow::Cow;
-use std::hash::Hasher;
+use std::fs::Permissions;
+use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
+use crate::common_tests::CommonPrefix;
 use crate::error_handling::AlreadyReportedError;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
 
@@ -68,7 +70,7 @@ impl FileConsumeAction for ReplaceWithSymlinkFileAction {
 struct PermissionEqualChecker;
 
 impl FileEqualsChecker for PermissionEqualChecker {
-    fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError> {
+    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsError> {
         let metadata_a = handle_file_op!(a.metadata(), a, return Err(CheckEqualsError::first_err()));
         let metadata_b= handle_file_op!(b.metadata(), b, return Err(CheckEqualsError::second_err()));
         let perm_a = metadata_a.permissions().mode() & 0b111_111_111;
@@ -76,7 +78,7 @@ impl FileEqualsChecker for PermissionEqualChecker {
         Ok(perm_a == perm_b)
     }
 
-    fn hash_component(&mut self, a: &PathBuf, hasher: &mut dyn Hasher) -> Result<(), AlreadyReportedError> {
+    fn hash_component(&mut self, a: &Path, hasher: &mut dyn Hasher) -> Result<(), AlreadyReportedError> {
         let metadata = handle_file_op!(a.metadata(), a, return Err(AlreadyReportedError));
         let perms = metadata.mode() & 0b111_111_111;
         hasher.write_u32(perms);
@@ -86,4 +88,44 @@ impl FileEqualsChecker for PermissionEqualChecker {
     fn work_severity(&self) -> FileWork {
         FileWork::FileMetadataWork
     }
+}
+
+#[test]
+fn test_permission_equal_checker() {
+    let mut prefix = CommonPrefix::new("unix_permission_checker_");
+    let file1 = prefix.make_file_auto();
+    let file2 = prefix.make_file_auto();
+    file1.0.set_permissions(Permissions::from_mode(0b111_111_111)).unwrap();
+    file2.0.set_permissions(Permissions::from_mode(0b110_111_111)).unwrap();
+    let mut equals_checker = PermissionEqualChecker;
+    let path1 = file1.1.to_push_buf();
+    let path2 = file2.1.to_push_buf();
+    assert!(!equals_checker.check_equal(&path1, &path2).unwrap());
+    let builder = std::collections::hash_map::RandomState::default();
+    let mut hash1 = builder.build_hasher();
+    equals_checker.hash_component(&path1, &mut hash1).unwrap();
+    let hash1 = hash1.finish();
+    let mut hash2 = builder.build_hasher();
+    equals_checker.hash_component(&path2, &mut hash2).unwrap();
+    let mut hash2 = hash2.finish();
+    assert_ne!(hash1, hash2);
+
+    let file1 = prefix.make_file_auto();
+    let file2 = prefix.make_file_auto();
+    let mut equals_checker = PermissionEqualChecker;
+
+    let path1 = file1.1.to_push_buf();
+    let path2 = file2.1.to_push_buf();
+
+    assert!(equals_checker.check_equal(&path1, &path2).unwrap());
+
+    let builder = std::collections::hash_map::RandomState::default();
+    let mut hash1 = builder.build_hasher();
+    equals_checker.hash_component(&path1, &mut hash1).unwrap();
+    let hash1 = hash1.finish();
+    let mut hash2 = builder.build_hasher();
+    equals_checker.hash_component(&path2, &mut hash2).unwrap();
+    let mut hash2 = hash2.finish();
+    assert_eq!(hash1, hash2);
+
 }
