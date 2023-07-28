@@ -1,5 +1,7 @@
 #![warn(clippy::pedantic)]
 
+extern crate core;
+
 mod set_order;
 mod set_consumer;
 mod parse_cli;
@@ -9,6 +11,8 @@ mod util;
 mod file_filters;
 mod error_handling;
 mod file_action;
+#[cfg(test)]
+mod common_tests;
 
 
 use std::collections::HashMap;
@@ -51,7 +55,7 @@ impl From<std::io::Error> for HashFileError {
 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HashedFile {
     file_version_timestamp: Option<SystemTime>,
     file_path: LinkedPath,
@@ -136,6 +140,32 @@ macro_rules! handle_access_dir {
 
 // find all files that need to be handled
 fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
+    macro_rules! handle_get_file_type {
+        ($result: expr, $path: expr, $file_name: expr, $on_err: expr) => {{
+            match $result {
+                Ok(ft) => ft,
+                Err(err) => {
+                    if log::log_enabled!(log::Level::Trace) {
+                        $path.push($file_name);
+                        log::trace!(target: "find_files", "failed to access {}: {err}", $path.display());
+                        $path.pop();
+                    }
+                    $on_err
+                }
+            }
+        }};
+    }
+    macro_rules! handle_follow_symlink {
+        ($result: expr, $path:expr,  $on_err: expr) => {
+            match $result {
+                    Ok(md) => md,
+                    Err(err) => {
+                        log::trace!("failed to follow symlink {}: {err}", $path.display());
+                        $on_err
+                    }
+            }
+        };
+    }
     let mut dir_list = vec![path];
 
     let mut path_acc = PathBuf::new();
@@ -144,17 +174,7 @@ fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bo
         let current_dir = handle_access_dir!(std::fs::read_dir(&path_acc), path_acc, continue);
         for entry in current_dir {
             let entry = handle_access_dir!(entry, path_acc, break);
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(err) => {
-                    if log::log_enabled!(log::Level::Trace) {
-                        path_acc.push(entry.file_name());
-                        log::trace!(target: "find_files", "failed to access {}: {err}", path_acc.display());
-                        path_acc.pop();
-                    }
-                    continue;
-                }
-            };
+            let file_type = handle_get_file_type!(entry.file_type(), path_acc, entry.file_name(), continue);
             if file_type.is_file() {
                 let file_name = entry.file_name();
                 let pop_token = push_to_path(&mut path_acc, &file_name);
@@ -168,13 +188,7 @@ fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bo
             } else if file_type.is_symlink() && follow_symlink {
                 let entry_name = entry.file_name();
                 let pop_token = push_to_path(&mut path_acc, &entry_name);
-                let metadata = match std::fs::metadata(&pop_token.0) {
-                    Ok(md) => md,
-                    Err(err) => {
-                        log::trace!("failed to follow symlink {}: {err}", pop_token.0.display());
-                        continue;
-                    }
-                };
+                let metadata = handle_follow_symlink!(std::fs::metadata(&pop_token.0), pop_token.0, continue);
                 let entry_name = LinkedPath::new_child(&dir, entry_name);
                 if metadata.is_file() {
                     let keep_file = file_filter.keep_file_md(&entry_name, pop_token.0, &metadata);

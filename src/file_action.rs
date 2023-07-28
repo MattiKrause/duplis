@@ -4,6 +4,9 @@ use crate::error_handling::AlreadyReportedError;
 use crate::{handle_file_op, Recoverable};
 
 pub trait FileConsumeAction {
+    /// consumes the file pointed to by `path`
+    /// The `original` may be used for multiple calls of consume, so this should be kept in mind
+    /// the file pointed to by `original` can be assumed to exist
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult;
     /// return true if this requires an original file, for example because it links to the original file
     fn requires_original(&self) -> bool;

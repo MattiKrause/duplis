@@ -97,7 +97,7 @@ fn assemble_command_info() -> clap::Command {
 
 fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
     matches.get_many::<std::path::PathBuf>("dirs")
-        .map(|paths| paths.map(LinkedPath::from_path_buf).collect::<Vec<_>>())
+        .map(|paths| paths.map(|buf| buf.as_path()).map(LinkedPath::from_path_buf).collect::<Vec<_>>())
         .unwrap_or_else(|| vec![LinkedPath::root(".")])
 }
 
@@ -179,13 +179,13 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     let file_filter = {
         let mut metadata_filter: Vec<Box<dyn FileMetadataFilter>> = Vec::new();
         if let Some(filter) = matches.get_one::<FileSize>("maxfsize") {
-            metadata_filter.push(Box::new(MaxSizeFileFilter(filter.0)))
+            metadata_filter.push(Box::new(MaxSizeFileFilter::new(filter.0)))
         }
         if let Some(filter) = matches.get_one::<FileSize>("minfsize") {
-            metadata_filter.push(Box::new(MinSizeFileFilter(filter.0.saturating_sub(1))))
+            metadata_filter.push(Box::new(MinSizeFileFilter::new(filter.0.saturating_sub(1))))
         }
         if matches.get_flag("nonzerof") {
-            metadata_filter.push(Box::new(MinSizeFileFilter(0)))
+            metadata_filter.push(Box::new(MinSizeFileFilter::new(0)))
         }
         FileFilter(Box::new([]), metadata_filter.into_boxed_slice())
     };

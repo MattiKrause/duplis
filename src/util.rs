@@ -27,7 +27,14 @@ impl ChoiceInputReader for std::io::Stdin {
     }
 }
 
-#[derive(Clone, Debug)]
+impl <'a> ChoiceInputReader for &'a [u8] {
+    fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()> {
+        use std::io::BufRead;
+        self.read_line(buf).map(|_| ())
+    }
+}
+
+#[derive(Clone, Debug, Eq)]
 pub struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
 impl LinkedPath {
     pub fn new_child(parent: &Arc<LinkedPath>, segment: OsString) -> Self {
@@ -52,7 +59,7 @@ impl LinkedPath {
         path_buf
     }
 
-    pub fn from_path_buf(buf: &PathBuf) -> Arc<Self> {
+    pub fn from_path_buf(buf: &Path) -> Arc<Self> {
         buf.iter().map(ToOwned::to_owned)
             .fold(None, |acc, res| Some(Arc::new(LinkedPath(acc, res))))
             .expect("empty path")
@@ -63,10 +70,16 @@ impl LinkedPath {
     }
 }
 
+impl PartialEq for LinkedPath {
+    fn eq(&self, other: &Self) -> bool {
+        (self.1 == other.1) && (self.0 == other.0)
+    }
+}
+
 pub fn path_contains_comma(path: &Path) -> bool {
     #[cfg(unix)]
     return {
-        use std::os::unix::ffi::OsStrExt;;
+        use std::os::unix::ffi::OsStrExt;
         path.as_os_str().as_bytes().contains(&b',')
     };
     #[cfg(not(unix))]

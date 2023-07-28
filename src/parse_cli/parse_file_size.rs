@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use clap::builder::{PossibleValuesParser, StringValueParser, TypedValueParser};
-use clap::{Arg, Command};
+use clap::{Arg};
 use clap::error::{ErrorKind as ClapErrorKind, ContextKind as ClapContextKind, ContextValue as ClapContextValue};
 
 #[derive(Clone)]
@@ -12,7 +12,7 @@ pub(crate) struct FileSizeValueParser;
 impl TypedValueParser for FileSizeValueParser {
     type Value = FileSize;
 
-    fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, clap::Error> {
+    fn parse_ref(&self, cmd: &clap::Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, clap::Error> {
         let value = StringValueParser::new().parse_ref(cmd, arg, value)?;
 
         let (fs_literal, rem, parsed) = if value.starts_with("0b") | value.starts_with("0B") {
@@ -69,11 +69,12 @@ impl TypedValueParser for FileSizeValueParser {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 enum ParseIntError {
     Overflow
 }
 
-fn format_int_err(err: ParseIntError, cmd: &Command, arg: Option<&Arg>) -> clap::Error {
+fn format_int_err(err: ParseIntError, cmd: &clap::Command, arg: Option<&Arg>) -> clap::Error {
     let arg = arg.map(|arg| arg.to_string());
     let literal_style = cmd.get_styles().get_literal();
     let for_arg_txt = if let Some(arg) = &arg {
@@ -170,4 +171,18 @@ fn parse_hexadecimal(value: &str) -> Result<(u64, &str, bool), ParseIntError> {
         }
     };
     Ok((acc, remaining, last_e))
+}
+
+#[test]
+fn test_num_prefix() {
+    let result = parse_number_prefix("1923123basdjas", 10).unwrap();
+    assert_eq!(result, (1923123, "basdjas"));
+    let result = parse_number_prefix("00", 10).unwrap();
+    assert_eq!(result, (0, ""));
+    let result = parse_number_prefix("413lpik", 8).unwrap();
+    assert_eq!(result, (0o413, "lpik"));
+    let result = parse_number_prefix("01012345",2).unwrap();
+    assert_eq!(result, (0b0101, "2345"));
+    let result = parse_number_prefix("184467440737095516151basd", 10).unwrap_err();
+    assert!(matches!(result, ParseIntError::Overflow));
 }

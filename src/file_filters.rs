@@ -69,13 +69,25 @@ pub trait FileMetadataFilter {
 }
 
 /// Only allow files with more than the given size
-pub struct MinSizeFileFilter(pub u64);
+pub struct MinSizeFileFilter(u64);
 /// Only allow files with less than the given size
-pub struct MaxSizeFileFilter(pub u64);
+pub struct MaxSizeFileFilter(u64);
+
+impl MinSizeFileFilter {
+    pub fn new(min: u64) -> Self {
+        Self(min)
+    }
+}
 
 impl FileMetadataFilter for MinSizeFileFilter {
     fn filter_file_metadata(&mut self, _: &LinkedPath, _: &Path, metadata: &Metadata) -> Result<bool, ()> {
         Ok(metadata.len() > self.0)
+    }
+}
+
+impl MaxSizeFileFilter {
+    pub(crate) fn new(max: u64) -> Self {
+        Self(max)
     }
 }
 

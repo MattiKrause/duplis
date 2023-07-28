@@ -1,12 +1,12 @@
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use crate::{handle_file_op, HashedFile, Recoverable};
-use crate::error_handling::AlreadyReportedError;
+use crate::error_handling::{AlreadyReportedError, report_file_missing};
 use crate::file_action::FileConsumeAction;
 use crate::util::{ChoiceInputReader, path_contains_comma};
 
 pub trait FileSetConsumer {
-    /// first element of set is the 'original'
+    /// first element of set is the 'original',
+    /// the set is a least of size 2
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
 
@@ -27,12 +27,6 @@ pub struct InteractiveEachChoice<R, W> {
     write: W,
 }
 
-
-pub struct InteractiveSetChoice {
-    path_buf: PathBuf,
-    input_buf: String,
-    action: Box<dyn FileConsumeAction>,
-}
 
 /// simply print all files that would be affected by an action
 pub struct DryRun<W> {
@@ -113,11 +107,23 @@ impl UnconditionalAction {
 }
 
 impl FileSetConsumer for UnconditionalAction {
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        set[0].file_path.write_full_to_buf(&mut self.original_buf);
-        let original_buf = &self.original_buf;
+    fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        let original_buf = loop {
+            let Some(file) = set.get(0) else { return Ok(()) };
+            file.file_path.write_full_to_buf(&mut self.original_buf);
+            if self.original_buf.exists() {
+                break &self.original_buf
+            } else {
+                report_file_missing(&self.original_buf);
+                set.remove(0);
+            }
+        };
         for file in &set[1..] {
             file.file_path.write_full_to_buf(&mut self.running_buf);
+            if !self.running_buf.exists() {
+                report_file_missing(&self.running_buf);
+                continue
+            }
             if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&original_buf)) {
                 log::error!("aborting '{}' due to previous error", self.action.short_name());
                 return Err(AlreadyReportedError)
@@ -147,16 +153,32 @@ impl<R, W> InteractiveEachChoice<R, W> {
 }
 
 impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEachChoice<R, W> {
-    fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-        set[0].file_path.write_full_to_buf(&mut self.original_buf);
+    fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
+        let original_buf = loop {
+            let Some(file) = set.get(0) else { return Ok(()) };
+            file.file_path.write_full_to_buf(&mut self.original_buf);
+            if self.original_buf.exists() {
+               break &self.original_buf;
+            } else {
+                report_file_missing(&self.original_buf);
+                set.remove(0);
+            }
+        };
         for file in &set[1..] {
             file.file_path.write_full_to_buf(&mut self.running_buf);
-
-            write!(self.write, "{} {}? ", self.action.short_name().as_ref(), self.running_buf.display()).map_err(out_err_map!())?;
+            if !self.running_buf.exists() {
+                report_file_missing(&self.running_buf);
+                continue;
+            }
+            writeln!(self.write, "{} {}?", self.action.short_name().as_ref(), self.running_buf.display()).map_err(out_err_map!())?;
             let execute_action = loop {
                 self.write.flush().map_err(out_err_map!())?;
                 self.choice_buf.clear();
                 self.read.read_remaining(&mut self.choice_buf).map_err(in_err_map!())?;
+                if self.choice_buf.is_empty() {
+                    log::error!("cannot accept input in interactive mode since the input is closed");
+                    return Err(AlreadyReportedError)
+                }
                 let choice = self.choice_buf.trim();
 
                 if choice.eq_ignore_ascii_case("y") | choice.eq_ignore_ascii_case("yes") {
@@ -164,12 +186,12 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 } else if choice.eq_ignore_ascii_case("n") | choice.eq_ignore_ascii_case("no") {
                     break false;
                 } else {
-                    write!(self.write, "unrecognised answer; only y(es) and n(o) are accepted").map_err(out_err_map!())?;
+                    writeln!(self.write, "unrecognised answer; only y(es) and n(o) are accepted").map_err(out_err_map!())?;
                 }
             };
 
             if execute_action {
-                if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&self.original_buf)) {
+                if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(original_buf)) {
                     log::error!("aborting '{}' due to previous error", self.action.short_name());
                     return Err(AlreadyReportedError)
                 };
@@ -268,5 +290,5 @@ fn find_nocomma_original(set: &mut Vec<HashedFile>, orig_path: &mut PathBuf) -> 
 }
 
 fn warn_path_contains_comma(path: &Path) {
-    log::warn!("path {} contains a ',' and cannot be written in machine readable format", path.display());
+    log::warn!(target: "output_err", "path {} contains a ',' and cannot be written in machine readable format", path.display());
 }

@@ -1,3 +1,5 @@
 /target
 /.idea
 /localscripts
+perf.*
+/test_files
