@@ -1,6 +1,6 @@
 use std::path::{PathBuf};
 use std::time::SystemTime;
-use crate::{handle_file_modified, handle_file_op, HashedFile};
+use crate::{handle_file_op, HashedFile};
 use crate::error_handling::AlreadyReportedError;
 
 pub trait SetOrder: DynCloneSetOrder {
@@ -90,7 +90,7 @@ impl SetOrder for ModTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.0.order(files, |md| {
             md.modified().map_err(|err| {
-                log::error!("cannot access modification time on current platform: {err}");
+                log::error!(target: crate::error_handling::CONFIG_ERR_TARGET, "cannot access modification time on current platform: {err}");
                 AlreadyReportedError
             })
         })
@@ -102,7 +102,7 @@ impl SetOrder for CreateTimeSetOrder {
     fn order(&mut self, files: &mut Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         self.0.order(files, |md| {
             md.created().map_err(|err| {
-                log::error!("cannot access creation time on current platform: {err}");
+                log::error!(target: crate::error_handling::CONFIG_ERR_TARGET,"cannot access creation time on current platform: {err}");
                 AlreadyReportedError
             })
         })

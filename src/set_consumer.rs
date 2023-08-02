@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use crate::{handle_file_op, HashedFile, Recoverable};
-use crate::error_handling::{AlreadyReportedError, report_file_missing};
+use std::path::{PathBuf};
+use crate::{handle_file_op, HashedFile, in_err_map, out_err_map, Recoverable, report_file_missing};
+use crate::error_handling::{AlreadyReportedError};
 use crate::file_action::FileConsumeAction;
 use crate::util::{ChoiceInputReader, path_contains_comma};
 
@@ -61,20 +61,10 @@ impl DryRun<std::io::Stdout> {
     }
 }
 
-/// in case the out-stream of the printing consumers fails
-macro_rules! out_err_map {
-    () => { |err| {
-        log::error!("cannot write out in interactive mode: {err}; aborting");
-        AlreadyReportedError
-    }};
-}
-
-/// in case the in-stream of the interactive consumers fails
-macro_rules! in_err_map {
-    () => { |err| {
-        log::error!("cannot accept input in interactive mode: {err}; aborting");
-        AlreadyReportedError
-    }};
+macro_rules! warn_path_contains_comma {
+    ($path: expr) => {
+        log::warn!(target: crate::error_handling::FORMAT_ERR_TARGET, "path {} contains a ',' and cannot be written in machine readable format", $path.display());
+    };
 }
 
 impl<W: std::io::Write> FileSetConsumer for DryRun<W> {
@@ -114,18 +104,18 @@ impl FileSetConsumer for UnconditionalAction {
             if self.original_buf.exists() {
                 break &self.original_buf
             } else {
-                report_file_missing(&self.original_buf);
+                report_file_missing!(&self.original_buf);
                 set.remove(0);
             }
         };
         for file in &set[1..] {
             file.file_path.write_full_to_buf(&mut self.running_buf);
             if !self.running_buf.exists() {
-                report_file_missing(&self.running_buf);
+                report_file_missing!(&self.running_buf);
                 continue
             }
             if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&original_buf)) {
-                log::error!("aborting '{}' due to previous error", self.action.short_name());
+                log::error!(target: crate::error_handling::FILE_SET_ERR_TARGET,"aborting '{}' due to previous error", self.action.short_name());
                 return Err(AlreadyReportedError)
             };
         }
@@ -160,14 +150,14 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
             if self.original_buf.exists() {
                break &self.original_buf;
             } else {
-                report_file_missing(&self.original_buf);
+                report_file_missing!(&self.original_buf);
                 set.remove(0);
             }
         };
         for file in &set[1..] {
             file.file_path.write_full_to_buf(&mut self.running_buf);
             if !self.running_buf.exists() {
-                report_file_missing(&self.running_buf);
+                report_file_missing!(&self.running_buf);
                 continue;
             }
             writeln!(self.write, "{} {}?", self.action.short_name().as_ref(), self.running_buf.display()).map_err(out_err_map!())?;
@@ -176,7 +166,7 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 self.choice_buf.clear();
                 self.read.read_remaining(&mut self.choice_buf).map_err(in_err_map!())?;
                 if self.choice_buf.is_empty() {
-                    log::error!("cannot accept input in interactive mode since the input is closed");
+                    log::error!(target: crate::error_handling::INTERACTION_ERR_TARGET, "cannot accept input in interactive mode since the input is closed");
                     return Err(AlreadyReportedError)
                 }
                 let choice = self.choice_buf.trim();
@@ -192,7 +182,7 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
 
             if execute_action {
                 if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(original_buf)) {
-                    log::error!("aborting '{}' due to previous error", self.action.short_name());
+                    log::error!(target: crate::error_handling::FILE_SET_ERR_TARGET, "aborting '{}' due to previous error", self.action.short_name());
                     return Err(AlreadyReportedError)
                 };
             }
@@ -222,7 +212,7 @@ impl <W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
 
             let tmp_path = handle_file_op!(std::fs::canonicalize(&*tmp_path), tmp_path, continue);
             if path_contains_comma(&tmp_path) {
-                warn_path_contains_comma(&tmp_path);
+                warn_path_contains_comma!(&tmp_path);
                 continue;
             }
             if self.written_before {
@@ -260,7 +250,7 @@ impl <W: std::io::Write> FileSetConsumer for MachineReadableSet<W> {
             file.file_path.write_full_to_buf(tmp_path);
             let tmp_path = handle_file_op!(tmp_path.canonicalize(), tmp_path, continue);
             if path_contains_comma(&tmp_path) {
-                warn_path_contains_comma(&tmp_path);
+                warn_path_contains_comma!(&tmp_path);
                 continue;
             }
             let empty_path = PathBuf::new();
@@ -279,7 +269,7 @@ fn find_nocomma_original(set: &mut Vec<HashedFile>, orig_path: &mut PathBuf) -> 
         first.file_path.write_full_to_buf(orig_path);
         let orig_path = handle_file_op!(orig_path.canonicalize(), orig_path, {set.remove(0); continue});
         if path_contains_comma(&orig_path) {
-            warn_path_contains_comma(&orig_path);
+            warn_path_contains_comma!(&orig_path);
             set.remove(0);
             continue
         }
@@ -287,8 +277,4 @@ fn find_nocomma_original(set: &mut Vec<HashedFile>, orig_path: &mut PathBuf) -> 
         break orig_path
     };
     Some(buf)
-}
-
-fn warn_path_contains_comma(path: &Path) {
-    log::warn!(target: "output_err", "path {} contains a ',' and cannot be written in machine readable format", path.display());
 }

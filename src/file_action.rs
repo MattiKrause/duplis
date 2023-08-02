@@ -40,7 +40,7 @@ pub struct ReplaceWithHardLinkFileAction {
 /// report a successful file action
 #[macro_export]
 macro_rules! report_file_action {
-    ($text: literal, $($r: expr),*) => {log::info!(target: "file_action", $text, $($r),*)};
+    ($text: literal, $($r: expr),*) => {log::info!(target: crate::error_handling::ACTION_SUCCESS_TARGET, $text, $($r),*)};
 }
 
 impl FileConsumeAction for DebugFileAction {
@@ -87,7 +87,7 @@ impl FileConsumeAction for ReplaceWithHardLinkFileAction {
         let original = original.expect("original required");
         handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         if let Err(err) = std::fs::hard_link(original, path) {
-            log::error!("FATAL ERROR: failed to create hard link to {} from {} due to error {err}", path.display(), original.display());
+            log::error!(target: crate::error_handling::ACTION_FATAL_FAILURE_TARGET, "FATAL ERROR: failed to create hard link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
             return Err(Recoverable::Fatal(AlreadyReportedError));
         }

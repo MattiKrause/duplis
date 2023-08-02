@@ -1,11 +1,13 @@
 mod parse_file_size;
 
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
 use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, ValueParser};
+use crate::error_handling::get_all_log_targets;
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
 use crate::file_filters::{FileFilter, FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
@@ -25,12 +27,14 @@ pub struct ExecutionPlan {
     pub order_set: Vec<Box<dyn SetOrder + Send>>,
     pub action: Box<dyn FileSetConsumer>,
     pub file_filter: FileFilter,
-    pub num_threads: NonZeroU32
+    pub num_threads: NonZeroU32,
+    pub ignore_log_set: Vec<String>,
 }
 
 const ACTION_MODE_GROUP: &str = "action_mode";
 const ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
 const FILE_ACTION_GROUP: &str = "file_action";
+const SET_LOG_TARGET_GROUP: &str = "set_log_action";
 
 fn assemble_command_info() -> clap::Command {
     let mut command = clap::Command::new("duplis")
@@ -58,7 +62,7 @@ fn assemble_command_info() -> clap::Command {
                 PossibleValue::new("setwise").help("print entire duplicate sets, with set members separated by comma and sets separated by \\n")
             ])
             .require_equals(true)
-             .num_args(0..=1)
+            .num_args(0..=1)
             .action(ArgAction::Set)
             .default_missing_value(OsStr::from("pairwise"))
             .group(ACTION_MODE_GROUP)
@@ -89,9 +93,23 @@ fn assemble_command_info() -> clap::Command {
         .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
         .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
         .arg(arg!(numthreads: -t --threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
+        .arg(arg!(logtargets: --loginfo <INFO> "update the log targets(+$TARGET turns on, ~$TARGET turns off)")
+            .action(ArgAction::Append)
+            .required(false)
+            .value_parser(PossibleValuesParser::new(get_all_log_targets().into_iter().flat_map(|target| [format!("~{target}"), format!("+{target}")]).collect::<Vec<_>>()))
+            .ignore_case(true)
+            .group(SET_LOG_TARGET_GROUP)
+        )
+        .arg(arg!(setlogtargets: --setloginfo <INFO> "set the log targets to be logged")
+            .action(ArgAction::Append)
+            .required(false)
+            .value_parser(PossibleValuesParser::new(get_all_log_targets()))
+            .ignore_case(true)
+            .group(SET_LOG_TARGET_GROUP)
+        )
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
         .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP));
-    for (name, short, long, help, _) in get_file_consume_action_args(){
+    for (name, short, long, help, _) in get_file_consume_action_args() {
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group(FILE_ACTION_GROUP));
     }
     for (name, short, long, help, _) in get_file_equals_args() {
@@ -121,6 +139,32 @@ fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder + Send>> 
     order
 }
 
+fn parse_ignore_log_targets(matches: &clap::ArgMatches) -> Vec<String> {
+    if let Some(targets) = matches.get_many::<String>("setlogtargets") {
+        let all_targets = get_all_log_targets();
+        let targets = targets
+            .map(|it| it.to_ascii_lowercase())
+            .collect::<HashSet<String>>();
+        all_targets.into_iter().filter(|s| !targets.contains(*s)).map(|s| s.to_owned()).collect::<Vec<_>>()
+    } else if let Some(target_change) = matches.get_many::<String>("logtargets") {
+        let mut default_ignore = HashSet::new();
+        let changes = target_change
+            .map(|it| (it.starts_with('+'), &it[1..]))
+            .map(|(positive, target)| (target.to_ascii_lowercase(), positive));
+        for (target, positive) in changes {
+            if positive {
+                // if we want to log the target, we need to remove it from the ignore list
+                default_ignore.remove(&target);
+            } else {
+                default_ignore.insert(target);
+            }
+        }
+        default_ignore.into_iter().collect::<Vec<_>>()
+    } else {
+        vec![]
+    }
+}
+
 fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
     let default_order_options: Vec<(&'static str, Box<dyn SetOrder>, &'static str)> = vec![
         ("modtime", Box::new(ModTimeSetOrder::new(false)), "Order the files from least recently to most recently modified"),
@@ -129,9 +173,9 @@ fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
         ("rcreatetime", Box::new(CreateTimeSetOrder::new(true)), "Order the files from newest to oldest"),
         ("alphabetic", Box::new(NameAlphabeticSetOrder::new(false)), "Order the files alphabetically ascending(may behave strangely with chars that are not ascii letters or digits)"),
         ("ralphabetic", Box::new(NameAlphabeticSetOrder::new(true)), "Order the files alphabetically descending(risks and side effects of 'alphabetic' apply)"),
-        ("as_is", Box::new(NoopSetOrder::new()), "Do not order the files; the order is thus non-deterministic and not reproducible")
+        ("as_is", Box::new(NoopSetOrder::new()), "Do not order the files; the order is thus non-deterministic and not reproducible"),
     ];
-    let default_order_options= default_order_options.into_iter()
+    let default_order_options = default_order_options.into_iter()
         .map(|(name, action, help)| (name, String::from(help), action));
 
     let os_options = crate::os::get_set_order_options().into_iter()
@@ -152,13 +196,13 @@ fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, Stri
     default
 }
 
-fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker + Send>)>{
+fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker + Send>)> {
     let mut default: Vec<(_, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
         ("contenteq", 'c', "contenteq", String::from("compare files byte-by-byte"), Box::new(FileContentEquals::default()))
     ];
     let os_specific = crate::os::get_file_equals_simple()
         .into_iter()
-        .map(|SimpleFieEqualCheckerArg { name, short, long, help, action }| (name,short, long, help, action));
+        .map(|SimpleFieEqualCheckerArg { name, short, long, help, action }| (name, short, long, help, action));
     default.extend(os_specific);
     default
 }
@@ -198,7 +242,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     let num_threads = match matches.get_one::<u32>("numthreads") {
         Some(0) => {
             u32::try_from(std::thread::available_parallelism().map_or(1, NonZeroUsize::get).saturating_mul(2)).unwrap_or(u32::MAX)
-        },
+        }
         Some(num) => *num,
         None => 1
     };
@@ -217,7 +261,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     let file_equals = get_file_equals_args()
         .into_iter()
         .map(|(name, _, _, _, i)| (name, i))
-        .filter(|(name, _)|matches.get_flag(name))
+        .filter(|(name, _)| matches.get_flag(name))
         .map(|(_, i)| i)
         .collect::<Vec<_>>();
 
@@ -231,7 +275,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
             "setwise" => Box::new(MachineReadableSet::for_console()),
             _ => panic!("invalid maschine-reable-out config {kind}")
         }
-    }else {
+    } else {
         Box::new(DryRun::for_console())
     };
 
@@ -242,6 +286,8 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         (dirs, rec_dirs)
     };
 
+    let ignore_log_set = parse_ignore_log_targets(&matches);
+
     let plan = ExecutionPlan {
         dirs,
         recursive_dirs,
@@ -251,6 +297,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         action: file_set_consumer,
         file_filter,
         num_threads: NonZeroU32::new(num_threads).unwrap(),
+        ignore_log_set,
     };
     Ok(plan)
 }

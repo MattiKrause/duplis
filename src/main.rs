@@ -13,10 +13,11 @@ mod error_handling;
 mod file_action;
 #[cfg(test)]
 mod common_tests;
+mod logger;
 
 
-use std::collections::HashMap;
 use std::ffi::{OsString};
+use std::io::stderr;
 use std::ops::DerefMut;
 
 
@@ -25,8 +26,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use dashmap::DashMap;
 
-use log::LevelFilter;
-use simplelog::{Config};
+use log::{LevelFilter};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_filters::FileFilter;
 use crate::file_set_refiner::{FileSetRefiners};
@@ -64,10 +64,11 @@ pub struct HashedFile {
 pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
-    simplelog::SimpleLogger::init(LevelFilter::Trace, Config::default()).unwrap();
-
     // the data required to run the program
-    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter, num_threads } = parse_cli::parse().unwrap();
+    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter, num_threads, ignore_log_set } = parse_cli::parse().unwrap();
+
+    logger::DuplisLogger::init(ignore_log_set, LevelFilter::Trace, Box::new(stderr())).unwrap();
+
     let set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
     order_set.push(Box::new(SymlinkSetOrder::default()));
     // if don't thread we want essentially a list, if we thread, there is no harm in keeping then backlog in check
@@ -84,7 +85,7 @@ fn main() {
                     .name(format!("file_hash_worker_{t}"))
                     .spawn_scoped(s, || place_files_to_set(set_refiners, files_rev, &target));
                 if let Err(err) = thread {
-                    log::error!("threading not supported on this platform; please do not use the threading option({err})");
+                    log::error!(target: crate::error_handling::CONFIG_ERR_TARGET, "threading not supported on this platform; please do not use the threading option({err})");
                     return;
                 }
             }
@@ -131,7 +132,7 @@ macro_rules! handle_access_dir {
         match $result {
             Ok(dir) => dir,
             Err(err) => {
-                log::trace!(target: "find_files", "failed to access directory {}: {err}", $dir.display());
+                log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to access directory {}: {err}", $dir.display());
                 $action
             }
         }
@@ -147,7 +148,7 @@ fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bo
                 Err(err) => {
                     if log::log_enabled!(log::Level::Trace) {
                         $path.push($file_name);
-                        log::trace!(target: "find_files", "failed to access {}: {err}", $path.display());
+                        log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to access {}: {err}", $path.display());
                         $path.pop();
                     }
                     $on_err
@@ -160,7 +161,7 @@ fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bo
             match $result {
                     Ok(md) => md,
                     Err(err) => {
-                        log::trace!("failed to follow symlink {}: {err}", $path.display());
+                        log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to follow symlink {}: {err}", $path.display());
                         $on_err
                     }
             }

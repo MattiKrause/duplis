@@ -1,8 +1,7 @@
 use std::borrow::Cow;
-use std::fs::Permissions;
-use std::hash::{BuildHasher, Hasher};
+use std::hash::{Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
@@ -44,7 +43,7 @@ impl FileConsumeAction for ReplaceWithSymlinkFileAction {
         let original = handle_file_op!(std::fs::canonicalize(original), original, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
         if let Err(err) = std::os::unix::fs::symlink(&original, path) {
-            log::error!("FATAL ERROR: failed to create sym link to {} from {} due to error {err}", path.display(), original.display());
+            log::error!(target: crate::error_handling::ACTION_FATAL_FAILURE_TARGET, "FATAL ERROR: failed to create sym link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
             return Err(Recoverable::Fatal(AlreadyReportedError));
         }
@@ -91,7 +90,10 @@ impl FileEqualsChecker for PermissionEqualChecker {
 
 #[test]
 fn test_permission_equal_checker() {
+    use std::fs::Permissions;
     use crate::common_tests::CommonPrefix;
+    use std::hash::BuildHasher;;
+
     let mut prefix = CommonPrefix::new("unix_permission_checker_");
     let file1 = prefix.make_file_auto();
     let file2 = prefix.make_file_auto();
