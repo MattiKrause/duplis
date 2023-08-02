@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
-use crate::common_tests::CommonPrefix;
 use crate::error_handling::AlreadyReportedError;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
 
@@ -92,6 +91,7 @@ impl FileEqualsChecker for PermissionEqualChecker {
 
 #[test]
 fn test_permission_equal_checker() {
+    use crate::common_tests::CommonPrefix;
     let mut prefix = CommonPrefix::new("unix_permission_checker_");
     let file1 = prefix.make_file_auto();
     let file2 = prefix.make_file_auto();

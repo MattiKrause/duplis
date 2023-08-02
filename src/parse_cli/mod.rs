@@ -33,8 +33,10 @@ const ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
 const FILE_ACTION_GROUP: &str = "file_action";
 
 fn assemble_command_info() -> clap::Command {
-    let mut command = clap::Command::new("rrem_fast")
-        .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates")
+    let mut command = clap::Command::new("duplis")
+        .before_help("find duplicate files; does a dry-run by default, specify an action(which can be found below) to  change that")
+        .before_long_help("Find duplicate files. You can not only check based on content, but also other(potentially platform dependant) stuff like permissions.\n By default this program simply outputs equal files, in order to actually do something, you need to specify an action like delete")
+        .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates(Defaults to '.')")
             .value_hint(ValueHint::DirPath)
             .value_parser(value_parser!(std::path::PathBuf))
             .action(ArgAction::Append)
@@ -50,7 +52,7 @@ fn assemble_command_info() -> clap::Command {
             .group(ACTION_MODE_GROUP)
             .group(ACTION_MODE_ACTION_GROUP)
         )
-        .arg(arg!(machine_readable: --wout "Write all duplicates pairwise to stdout")
+        .arg(arg!(machine_readable: --wout <STRUCTURE> "Write all duplicates pairwise to stdout")
             .value_parser([
                 PossibleValue::new("pairwise").help("print duplicates in format $original,$duplicate\\n"),
                 PossibleValue::new("setwise").help("print entire duplicate sets, with set members separated by comma and sets separated by \\n")
@@ -68,7 +70,8 @@ fn assemble_command_info() -> clap::Command {
             .action(ArgAction::Append)
             .value_delimiter(',')
             .value_parser(set_order_parser())
-            .help("set the order in which the elements of equal file sets are ordered; the smallest is considered the original; may contain multiple orderings in decreasing importance; some orderings may be prefixed with r to reverse(example rmodtime)")
+            .help("specify order of files; smallest on is the original; 'r' prefix means reversed")
+            .long_help("Set the order in which the elements of equal file sets are ordered\nThe smallest is considered the original\nMay contain multiple orderings in decreasing importance\nSome orderings may be prefixed with r to reverse(example rmodtime)")
             .required(false)
         )
         .arg(arg!(minfsize: --minsize <SIZE> "Only consider files with >= $minsize bytes")
@@ -85,7 +88,7 @@ fn assemble_command_info() -> clap::Command {
         )
         .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
         .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
-        .arg(arg!(numthreads: -t -threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
+        .arg(arg!(numthreads: -t --threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
         .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP));
     for (name, short, long, help, _) in get_file_consume_action_args(){
