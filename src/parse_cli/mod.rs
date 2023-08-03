@@ -4,13 +4,14 @@ mod parse_file_size;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
+use clap::{arg, Arg, ArgAction, ArgGroup, Command, value_parser, ValueHint};
 use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, ValueParser};
 use crate::error_handling::get_all_log_targets;
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
-use crate::file_filters::{FileFilter, FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
+use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
@@ -35,6 +36,7 @@ const ACTION_MODE_GROUP: &str = "action_mode";
 const ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
 const FILE_ACTION_GROUP: &str = "file_action";
 const SET_LOG_TARGET_GROUP: &str = "set_log_action";
+const EXT_LIST_GROUP: &str = "ext_list";
 
 fn assemble_command_info() -> clap::Command {
     let mut command = clap::Command::new("duplis")
@@ -95,6 +97,7 @@ fn assemble_command_info() -> clap::Command {
         .arg(arg!(numthreads: -t --threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
         .arg(arg!(logtargets: --loginfo <INFO> "update the log targets(+$TARGET turns on, ~$TARGET turns off)")
             .action(ArgAction::Append)
+            .value_delimiter(',')
             .required(false)
             .value_parser(PossibleValuesParser::new(get_all_log_targets().into_iter().flat_map(|target| [format!("~{target}"), format!("+{target}")]).collect::<Vec<_>>()))
             .ignore_case(true)
@@ -103,9 +106,45 @@ fn assemble_command_info() -> clap::Command {
         .arg(arg!(setlogtargets: --setloginfo <INFO> "set the log targets to be logged")
             .action(ArgAction::Append)
             .required(false)
-            .value_parser(PossibleValuesParser::new(get_all_log_targets()))
+            .value_parser(PossibleValuesParser::new({
+                let mut targets = get_all_log_targets();
+                targets.push("~");
+                targets
+            }))
             .ignore_case(true)
             .group(SET_LOG_TARGET_GROUP)
+        )
+        .arg(arg!(extbl: --extbl <EXTENSIONS>)
+            .help("files with these extensions are not processed(~ means no extension)")
+            .long_help("files with these extensions are not processed(~ means no extension), extensions must be given without preceding dot(\"txt\" not \".txt\")")
+            .value_delimiter(',')
+            .value_parser(value_parser!(OsString))
+            .action(ArgAction::Append)
+            .required(false)
+            .group(EXT_LIST_GROUP)
+        )
+        .arg(arg!(extwl: --extwl <EXTENSIONS> "ONLY files with these extensions are processed")
+            .help("ONLY files with these extensions are processed(~ means no extension)")
+            .long_help("ONLY files with these extensions are processed(~ means no extension), extensions must be given without preceding dot(\"txt\" not \".txt\")")
+            .value_delimiter(',')
+            .value_parser(value_parser!(OsString))
+            .action(ArgAction::Append)
+            .required(false)
+            .group(EXT_LIST_GROUP)
+        )
+        .arg(arg!(pathbl: --pathbl <PATHS> "files with these paths as prefix will not be processed")
+            .value_delimiter(',')
+            .action(ArgAction::Append)
+            .value_parser(value_parser!(std::path::PathBuf))
+            .required(false)
+        )
+        .arg(arg!(pathblfiles: --pathblloc <FILES>)
+            .help("points to files which serve as blacklists for path prefixes(like pathbl)")
+            .long_help("points to files which serve as blacklists for path prefixes(like pathbl), the files must contain a list of \\n separated utf-8  encoded paths")
+            .action(ArgAction::Append)
+            .value_parser(PathListFileParser)
+            .value_delimiter(',')
+            .required(false)
         )
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
         .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP));
@@ -116,6 +155,35 @@ fn assemble_command_info() -> clap::Command {
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue))
     }
     command
+}
+
+#[derive(Clone)]
+struct PathListFileParser;
+
+impl clap::builder::TypedValueParser for PathListFileParser {
+    type Value = Vec<PathBuf>;
+
+    fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
+        use std::io::BufRead;
+        let err_map = |err: std::io::Error| {
+            let arg_text = arg.map_or(String::new(), |arg| {
+                let literal = cmd.get_styles().get_literal();
+                format!("'{}{arg}{}'", literal.render(), literal.render_reset())
+            });
+            let err_style = cmd.get_styles().get_error();
+            clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to open path file({arg_text}) {value:?}: {}{err}{}\n", err_style.render(), err_style.render_reset()))
+                .with_cmd(cmd)
+        };
+        let file = std::fs::OpenOptions::new().read(true).open(value)
+            .map_err(err_map)?;
+        let paths = std::io::BufReader::new(file)
+            .lines()
+            .filter(|s| s.as_ref().map_or(true, |s| !s.is_empty()))
+            .map(|s| s.map(std::path::PathBuf::from))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err_map)?;
+        Ok(paths)
+    }
 }
 
 fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
@@ -144,6 +212,7 @@ fn parse_ignore_log_targets(matches: &clap::ArgMatches) -> Vec<String> {
         let all_targets = get_all_log_targets();
         let targets = targets
             .map(|it| it.to_ascii_lowercase())
+            .filter(|s| s != "~")
             .collect::<HashSet<String>>();
         all_targets.into_iter().filter(|s| !targets.contains(*s)).map(|s| s.to_owned()).collect::<Vec<_>>()
     } else if let Some(target_change) = matches.get_many::<String>("logtargets") {
@@ -162,6 +231,22 @@ fn parse_ignore_log_targets(matches: &clap::ArgMatches) -> Vec<String> {
         default_ignore.into_iter().collect::<Vec<_>>()
     } else {
         vec![]
+    }
+}
+
+fn parse_path_blacklist(matches: &clap::ArgMatches) -> Option<Box<dyn FileNameFilter>> {
+    let mut blacklisted = Vec::new();
+    if let Some(bl) = matches.get_many::<PathBuf>("pathbl") {
+        blacklisted.extend(bl);
+    }
+    if let Some(bls) = matches.get_many::<Vec<PathBuf>>("pathblfiles") {
+        blacklisted.extend(bls.flatten())
+    }
+    if blacklisted.is_empty() {
+        None
+    } else {
+        let filter = PathFilter::new(blacklisted.iter().map(|p| p.as_path()));
+        Some(Box::new(filter))
     }
 }
 
@@ -226,6 +311,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
     let mut rec_dirs = vec![];
 
     let file_filter = {
+        let mut filename_filter: Vec<Box<dyn FileNameFilter>> = Vec::new();
         let mut metadata_filter: Vec<Box<dyn FileMetadataFilter>> = Vec::new();
         if let Some(filter) = matches.get_one::<FileSize>("maxfsize") {
             metadata_filter.push(Box::new(MaxSizeFileFilter::new(filter.0)))
@@ -236,7 +322,33 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         if matches.get_flag("nonzerof") {
             metadata_filter.push(Box::new(MinSizeFileFilter::new(0)))
         }
-        FileFilter(Box::new([]), metadata_filter.into_boxed_slice())
+        fn gather_exts<'a>(exts: impl Iterator<Item=&'a OsString>) -> (HashSet<OsString>, bool) {
+            let mut exts_col = HashSet::with_capacity(exts.size_hint().0);
+            let mut no_ext = false;
+            let curly = OsString::from("~");
+            for ext in exts {
+                if ext == &curly {
+                    no_ext = true;
+                } else {
+                    exts_col.insert(ext.clone());
+                }
+            }
+            (exts_col, no_ext)
+        }
+        if let Some(exts) = matches.get_many::<OsString>("extbl") {
+            let (exts, no_ext) = gather_exts(exts);
+            let filter = ExtensionFilter::new(exts, no_ext, false);
+            filename_filter.push(Box::new(filter));
+        }
+        if let Some(exts) = matches.get_many::<OsString>("extwl") {
+            let (exts, no_ext) = gather_exts(exts);
+            let filter = ExtensionFilter::new(exts, no_ext, true);
+            filename_filter.push(Box::new(filter));
+        }
+        if let Some(filter) = parse_path_blacklist(&matches) {
+            filename_filter.push(filter)
+        }
+        FileFilter(filename_filter.into_boxed_slice(), metadata_filter.into_boxed_slice())
     };
 
     let num_threads = match matches.get_one::<u32>("numthreads") {

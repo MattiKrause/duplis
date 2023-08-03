@@ -1,14 +1,12 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::io::{stdout, Write};
+use std::collections::{HashSet};
+use std::ffi::OsString;
+use std::io::{Write};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
-use log::LevelFilter;
-use simplelog::{Config, ConfigBuilder};
-use crate::error_handling::AlreadyReportedError;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
-use crate::file_filters::{FileMetadataFilter, MaxSizeFileFilter, MinSizeFileFilter};
+use crate::file_filters::{ExtensionFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
 use crate::HashedFile;
 use crate::set_consumer::{FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
@@ -22,7 +20,7 @@ fn create_file(path: &impl AsRef<std::path::Path>, content: &[u8]) -> CreateFile
     final_path.push("test_files");
     final_path.push(path);
     let path = &final_path;
-    let _ = std::fs::create_dir("test_files");
+    let _ = std::fs::create_dir_all(final_path.parent().unwrap());
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -119,6 +117,16 @@ impl Drop for CommonPrefix {
     }
 }
 
+fn test_named_filter(files: &Vec<(LinkedPath, PathBuf)>, expected: &[usize], mut filterer: impl FileNameFilter) {
+    let filtered = files.iter()
+        .filter(|(path, buf)| filterer.filter_file_name(path, buf).unwrap())
+        .collect::<Vec<_>>();
+    let expected = permute(&files, expected);
+    let expected = expected.iter().map(|(_, buf)| buf).collect::<Vec<_>>();
+    let filtered = filtered.into_iter().map(|(_, buf)| buf).collect::<Vec<_>>();
+    assert_eq!(filtered, expected);
+}
+
 #[test]
 fn test_ordering() {
     let mut prefix = CommonPrefix::new("ordering_");
@@ -168,7 +176,6 @@ fn test_file_filter() {
         .collect::<Vec<_>>();
 
     fn test_filter(files: &Vec<(LinkedPath, std::fs::Metadata,  PathBuf)>, expected: &[usize], mut filterer: impl FileMetadataFilter) {
-
         let filtered = files.iter().filter(|(path, md, buf)| filterer.filter_file_metadata(path, buf, md).unwrap())
             .collect::<Vec<_>>();
         let expected = permute(&files, expected);
@@ -185,6 +192,70 @@ fn test_file_filter() {
     test_filter(&files, &[], MaxSizeFileFilter::new(0));
 
     files.into_iter().for_each(|(_, _, file)| std::fs::remove_file(file).unwrap())
+}
+
+#[test]
+fn test_filter_extension() {
+    let mut prefix = CommonPrefix::new("test_filter_extension_");
+    let file0 = prefix.create_file("ext.ea", &[]);
+    let file1 = prefix.create_file("ext.eb", &[]);
+    let file2 = prefix.create_file("ext.ec", &[]);
+    let file3 = prefix.create_file("ext", &[]);
+
+    let files = [&file0, &file1, &file2, &file3].into_iter()
+        .map(|f| (f.1.clone(), f.1.to_push_buf()))
+        .collect::<Vec<_>>();
+
+    let filterer = ExtensionFilter::new(HashSet::from(["ea", "ec"].map(OsString::from)), false, false);
+
+    test_named_filter(&files, &[1, 3], filterer);
+
+    let filterer= ExtensionFilter::new(HashSet::from(["ea", "ec"].map(OsString::from)), true, false);
+    test_named_filter(&files, &[1], filterer);
+
+    let filterer= ExtensionFilter::new(HashSet::from(["ea", "ec"].map(OsString::from)), false, true);
+    test_named_filter(&files, &[0, 2], filterer);
+
+
+    let filterer= ExtensionFilter::new(HashSet::from(["ea", "ec"].map(OsString::from)), true, true);
+    test_named_filter(&files, &[0, 2, 3], filterer);
+}
+
+#[test]
+fn test_filter_path() {
+    let mut prefix = CommonPrefix::new("test_filter_prefix");
+
+    let file0 = prefix.create_file("/sdir1/ssdir1/file0", &[]);
+    let file1 = prefix.create_file("/sdir1/file1", &[]);
+    let file2 = prefix.create_file("/sdir1/ssdir2/file2", &[]);
+    let file3 = prefix.create_file("/sdir2/ssdir1/file3", &[]);
+    let file4 = prefix.create_file("/sdir2/file4", &[]);
+    let file5 = prefix.create_file("file5", &[]);
+
+    let files = [&file0, &file1, &file2, &file3, &file4, &file5].into_iter()
+        .map(|f| (f.1.clone(),  f.1.to_push_buf()))
+        .collect::<Vec<_>>();
+
+    let filterer = PathFilter::new([("test_files")].into_iter().map(<str as AsRef<Path>>::as_ref));
+
+    test_named_filter(&files, &[], filterer);
+
+    let filterer = PathFilter::new(["test_files/test_filter_prefix/sdir1"].into_iter().map(<str as AsRef<Path>>::as_ref));
+
+    test_named_filter(&files, &[3, 4, 5], filterer);
+
+    let filterer = PathFilter::new(["test_files/test_filter_prefix/sdir1/ssdir1", "test_files/test_filter_prefix/sdir1"].into_iter().map(<str as AsRef<Path>>::as_ref));
+
+    test_named_filter(&files, &[3, 4, 5], filterer);
+
+    let filterer = PathFilter::new(["test_files/test_filter_prefix/sdir1/ssdir1"].into_iter().map(<str as AsRef<Path>>::as_ref));
+    test_named_filter(&files, &[1, 2, 3, 4, 5], filterer);
+
+    let filterer = PathFilter::new(["test_files/test_filter_prefix/sdir1/ssdir1", "test_files/test_filter_prefix/sdir2/ssdir1"].into_iter().map(<str as AsRef<Path>>::as_ref));
+    test_named_filter(&files, &[1, 2, 4, 5], filterer);
+
+    let filterer = PathFilter::new(["test_files/test_filter_prefix/sdir1/file1"].into_iter().map(<str as AsRef<Path>>::as_ref));
+    test_named_filter(&files, &[0, 2, 3, 4, 5], filterer)
 }
 
 fn test_deleted_original(prefix: &mut CommonPrefix, mut consumer: impl FileSetConsumer) {
@@ -309,7 +380,6 @@ fn test_interactive_set_action() {
     let mut write_sink = Vec::new();
     let read_source = b"y\nn".as_ref();
 
-    simplelog::SimpleLogger::init(LevelFilter::Trace, ConfigBuilder::new().build()).unwrap();
     let mut writer = InteractiveEachChoice::new(read_source, &mut write_sink, Box::new(expected()));
     writer.consume_set(files).unwrap();
 
