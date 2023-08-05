@@ -3,7 +3,7 @@ use std::hash::{Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
-use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
+use crate::os::{SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
@@ -18,17 +18,19 @@ pub fn get_file_consume_action_simple() -> Vec<SimpleFileConsumeActionArg> {
         short: 'L',
         long: "resymlink",
         help: String::from("replace duplicate files with a symlink"),
+        default: false,
         action: Box::new(ReplaceWithSymlinkFileAction),
     };
     vec![rsymlink]
 }
 
-pub fn get_file_equals_arg_simple() -> Vec<SimpleFieEqualCheckerArg> {
-    let perm_eq = SimpleFieEqualCheckerArg {
+pub fn get_file_equals_arg_simple() -> Vec<SimpleFileEqualCheckerArg> {
+    let perm_eq = SimpleFileEqualCheckerArg {
         name: "perm_eq",
         short: 'p',
         long: "permeq",
-        help: String::from("consider files with different permissions different files"),
+        help: String::from("do not  consider files with different permissions different files"),
+        default: true,
         action: Box::new(PermissionEqualChecker),
     };
 

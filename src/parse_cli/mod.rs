@@ -15,7 +15,7 @@ use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileN
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 use crate::input_source::{DiscoveringInputSource, InputSource, StdInSource};
 
-use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
+use crate::os::{SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
 use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
@@ -52,6 +52,20 @@ fn assemble_command_info() -> clap::Command {
             .group(INPUT_SOURCE_GROUP)
             .group(DISCOVERING_SOURCE_GROUP)
         )
+        .arg(arg!(recurse: -r --recurse "search all listed directories recursively(requires dirs to be given via cli)")
+            .action(ArgAction::SetTrue)
+            .group(DISCOVERY_CONFIG_GROUP)
+        )
+        .arg(arg!(followsymlink: -s --symlink "follow symlinks to files and directories during discovery(requires dirs to be given  via cli)")
+            .action(ArgAction::SetTrue)
+            .required(false)
+            .group(DISCOVERY_CONFIG_GROUP)
+        )
+        .arg(arg!(discoverstdin: --readin "reads the files which should be tested for duplication from stdin")
+            .action(ArgAction::SetTrue)
+            .group(USES_STDIN_GROUP)
+            .group(INPUT_SOURCE_GROUP)
+        )
         .arg(arg!(uncond: -u --immediate "Execute the specified action without asking")
             .action(ArgAction::SetTrue)
             .group(ACTION_MODE_GROUP)
@@ -73,10 +87,20 @@ fn assemble_command_info() -> clap::Command {
             .action(ArgAction::Set)
             .default_missing_value(OsStr::from("pairwise"))
             .group(ACTION_MODE_GROUP)
-        )
-        .arg(arg!(recurse: -r --recurse "search all listed directories recursively(requires dirs to be given via cli)")
-            .action(ArgAction::SetTrue)
-            .group(DISCOVERY_CONFIG_GROUP)
+        );
+
+    for (name, short, long, help, _) in get_file_consume_action_args() {
+        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group(FILE_ACTION_GROUP));
+    }
+
+    command = command
+        .arg(arg!(numthreads: -t --threads <NUM_THREADS> "Use multi-threading(optionally provide the number of threads)")
+            .action(ArgAction::Set)
+            .required(false)
+            .require_equals(true)
+            .num_args(0..=1)
+            .value_parser(value_parser!(u32))
+            .default_missing_value(OsString::from("0"))
         )
         .arg(arg!(setorder: -o --orderby <ORDERINGS>)
             .action(ArgAction::Append)
@@ -101,38 +125,6 @@ fn assemble_command_info() -> clap::Command {
         .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files")
             .action(ArgAction::SetTrue)
             .required(false)
-        )
-        .arg(arg!(followsymlink: -s --symlink "follow symlinks to files and directories during discovery(requires dirs to be given  via cli)")
-            .action(ArgAction::SetTrue)
-            .required(false)
-            .group(DISCOVERY_CONFIG_GROUP)
-        )
-        .arg(arg!(numthreads: -t --threads <NUM_THREADS> "Use multi-threading(optionally provide the number of threads)")
-            .action(ArgAction::Set)
-            .required(false)
-            .require_equals(true)
-            .num_args(0..=1)
-            .value_parser(value_parser!(u32))
-            .default_missing_value(OsString::from("0"))
-        )
-        .arg(arg!(logtargets: --loginfo <INFO> "update the log targets(+$TARGET turns on, ~$TARGET turns off)")
-            .action(ArgAction::Append)
-            .value_delimiter(',')
-            .required(false)
-            .value_parser(PossibleValuesParser::new(get_all_log_targets().into_iter().flat_map(|target| [format!("~{target}"), format!("+{target}")]).collect::<Vec<_>>()))
-            .ignore_case(true)
-            .group(SET_LOG_TARGET_GROUP)
-        )
-        .arg(arg!(setlogtargets: --setloginfo <INFO> "set the log targets to be logged")
-            .action(ArgAction::Append)
-            .required(false)
-            .value_parser(PossibleValuesParser::new({
-                let mut targets = get_all_log_targets();
-                targets.push("~");
-                targets
-            }))
-            .ignore_case(true)
-            .group(SET_LOG_TARGET_GROUP)
         )
         .arg(arg!(extbl: --extbl <EXTENSIONS>)
             .help("files with these extensions are not processed(~ means no extension)")
@@ -165,22 +157,34 @@ fn assemble_command_info() -> clap::Command {
             .value_parser(PathListFileParser)
             .value_delimiter(',')
             .required(false)
+        );
+    for (name, short, long, help, default, _) in get_file_equals_args() {
+        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(if default { ArgAction::SetFalse } else { ArgAction::SetTrue}))
+    }
+    command = command
+        .arg(arg!(logtargets: --loginfo <INFO> "update the log targets(+$TARGET turns on, ~$TARGET turns off)")
+            .action(ArgAction::Append)
+            .value_delimiter(',')
+            .required(false)
+            .value_parser(PossibleValuesParser::new(get_all_log_targets().into_iter().flat_map(|target| [format!("~{target}"), format!("+{target}")]).collect::<Vec<_>>()))
+            .ignore_case(true)
+            .group(SET_LOG_TARGET_GROUP)
         )
-        .arg(arg!(discoverstdin: --readin "reads the files which should be tested for duplication from stdin")
-            .action(ArgAction::SetTrue)
-            .group(USES_STDIN_GROUP)
-            .group(INPUT_SOURCE_GROUP)
+        .arg(arg!(setlogtargets: --setloginfo <INFO> "set the log targets to be logged")
+            .action(ArgAction::Append)
+            .required(false)
+            .value_parser(PossibleValuesParser::new({
+                let mut targets = get_all_log_targets();
+                targets.push("~");
+                targets
+            }))
+            .ignore_case(true)
+            .group(SET_LOG_TARGET_GROUP)
         )
         .group(ArgGroup::new(INPUT_SOURCE_GROUP).required(true).multiple(true))
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
         .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP))
         .group(ArgGroup::new(DISCOVERY_CONFIG_GROUP).requires(DISCOVERING_SOURCE_GROUP).multiple(true));
-    for (name, short, long, help, _) in get_file_consume_action_args() {
-        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group(FILE_ACTION_GROUP));
-    }
-    for (name, short, long, help, _) in get_file_equals_args() {
-        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue))
-    }
     command
 }
 
@@ -367,18 +371,18 @@ fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, Stri
     ];
     let os_specific = crate::os::get_file_consumer_simple()
         .into_iter()
-        .map(|SimpleFileConsumeActionArg { name, short, long, help, action }| (name, short, long, help, action));
+        .map(|SimpleFileConsumeActionArg { name, short, long, help, default: _, action }| (name, short, long, help, action));
     default.extend(os_specific);
     default
 }
 
-fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileEqualsChecker + Send>)> {
-    let mut default: Vec<(_, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
-        ("contenteq", 'c', "contenteq", String::from("compare files byte-by-byte"), Box::new(FileContentEquals::default()))
+fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, bool, Box<dyn FileEqualsChecker + Send>)> {
+    let mut default: Vec<(_, _, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
+        ("contenteq", 'c', "nocontenteq", String::from("do not compare files byte-by-byte(only by hash)"), true, Box::new(FileContentEquals::default()))
     ];
     let os_specific = crate::os::get_file_equals_simple()
         .into_iter()
-        .map(|SimpleFieEqualCheckerArg { name, short, long, help, action }| (name, short, long, help, action));
+        .map(|SimpleFileEqualCheckerArg { name, short, long, help, default, action }| (name, short, long, help, default, action));
     default.extend(os_specific);
     default
 }
@@ -416,7 +420,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
 
     let file_equals = get_file_equals_args()
         .into_iter()
-        .map(|(name, _, _, _, i)| (name, i))
+        .map(|(name, _, _, _, _, i)| (name, i))
         .filter(|(name, _)| matches.get_flag(name))
         .map(|(_, i)| i)
         .collect::<Vec<_>>();
