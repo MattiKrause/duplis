@@ -3,10 +3,11 @@ use std::ffi::OsString;
 use std::fs::Metadata;
 use std::ops::DerefMut;
 use std::path::Path;
-use crate::{handle_file_op};
+use std::sync::Arc;
+use crate::{dyn_clone_impl, handle_file_op};
 use crate::util::LinkedPath;
 
-pub struct FileFilter(pub Box<[Box<dyn FileNameFilter>]>, pub Box<[Box<dyn FileMetadataFilter>]>);
+pub struct FileFilter(pub Box<[Box<dyn FileNameFilter + Send>]>, pub Box<[Box<dyn FileMetadataFilter + Send>]>);
 
 impl FileFilter {
     fn filter_name(&mut self, name: &LinkedPath, name_path: &Path) -> bool {
@@ -60,32 +61,47 @@ impl FileFilter {
     }
 }
 
+impl Clone for FileFilter {
+    fn clone(&self) -> Self {
+        let named = self.0.iter().map(|f| f.dyn_clone()).collect::<Vec<_>>().into_boxed_slice();
+        let metadata = self.1.iter().map(|f| f.dyn_clone()).collect::<Vec<_>>().into_boxed_slice();
+        Self(named, metadata)
+    }
+}
+
 /// Filters files only based on the name
-pub trait FileNameFilter {
+pub trait FileNameFilter: FileNameFilterDynClone {
     fn filter_file_name(&mut self, name: &LinkedPath, name_path: &Path) -> Result<bool, ()>;
 }
 
 /// Filters files based on the name and metadata
-pub trait FileMetadataFilter {
+pub trait FileMetadataFilter: FileMetadataFilterDynClone {
     fn filter_file_metadata(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> Result<bool, ()>;
 }
 
+dyn_clone_impl!(FileNameFilterDynClone, FileNameFilter);
+dyn_clone_impl!(FileMetadataFilterDynClone, FileMetadataFilter);
+
 /// Only allow files with more than the given size
+#[derive(Clone)]
 pub struct MinSizeFileFilter(u64);
 
 /// Only allow files with less than the given size
+#[derive(Clone)]
 pub struct MaxSizeFileFilter(u64);
 
 /// Only allow files whose extensions are not in the set
+#[derive(Clone)]
 pub struct ExtensionFilter {
-    extensions: HashSet<OsString>,
+    extensions: Arc<HashSet<OsString>>,
     no_ext_in_set: bool,
     /// if true then extensions is a white-list, otherwise, extensions is a blacklist
     positive: bool,
 }
 
 //FIXME/TODO what happens to discovered symlinks, are they canonicalised, how should symlink filters be treated?
-pub struct PathFilter(PathFilterTree);
+#[derive(Clone)]
+pub struct PathFilter(Arc<PathFilterTree>);
 
 #[derive(Debug)]
 struct PathFilterTree(HashMap<OsString, Option<PathFilterTree>>);
@@ -116,7 +132,7 @@ impl FileMetadataFilter for MaxSizeFileFilter {
 
 impl ExtensionFilter {
     pub(crate) fn new(extensions: HashSet<OsString>, no_extension_in_set: bool, positive: bool) -> Self {
-        Self { extensions, no_ext_in_set: no_extension_in_set, positive }
+        Self { extensions: Arc::new(extensions), no_ext_in_set: no_extension_in_set, positive }
     }
 }
 
@@ -153,13 +169,13 @@ impl PathFilter {
             let Some(file_name) = path.file_name() else { continue; };
             current.0.insert(file_name.to_os_string(), None);
         }
-        Self(root)
+        Self(Arc::new(root))
     }
 }
 
 impl FileNameFilter for PathFilter {
     fn filter_file_name(&mut self, _: &LinkedPath, name_path: &Path) -> Result<bool, ()> {
-        let mut current = &self.0;
+        let mut current = self.0.as_ref();
         for seg in name_path.iter() {
             let Some(entry) = current.0.get(seg) else { return Ok(true); };
             match entry.as_ref() {

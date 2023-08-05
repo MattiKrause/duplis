@@ -6,13 +6,14 @@ use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use clap::{arg, Arg, ArgAction, ArgGroup, Command, value_parser, ValueHint};
+use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
 use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, ValueParser};
 use crate::error_handling::get_all_log_targets;
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
 use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
+use crate::input_source::{DiscoveringInputSource, InputSource, StdInSource};
 
 use crate::os::{SetOrderOption, SimpleFieEqualCheckerArg, SimpleFileConsumeActionArg};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
@@ -21,32 +22,35 @@ use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrd
 use crate::util::LinkedPath;
 
 pub struct ExecutionPlan {
-    pub dirs: Vec<Arc<LinkedPath>>,
-    pub recursive_dirs: Vec<Arc<LinkedPath>>,
-    pub follow_symlinks: bool,
     pub file_equals: Vec<Box<dyn FileEqualsChecker + Send>>,
     pub order_set: Vec<Box<dyn SetOrder + Send>>,
     pub action: Box<dyn FileSetConsumer>,
-    pub file_filter: FileFilter,
     pub num_threads: NonZeroU32,
     pub ignore_log_set: Vec<String>,
+    pub input_sources: Vec<Box<dyn InputSource>>,
 }
 
-const ACTION_MODE_GROUP: &str = "action_mode";
-const ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
-const FILE_ACTION_GROUP: &str = "file_action";
-const SET_LOG_TARGET_GROUP: &str = "set_log_action";
-const EXT_LIST_GROUP: &str = "ext_list";
+static ACTION_MODE_GROUP: &str = "action_mode";
+static ACTION_MODE_ACTION_GROUP: &str = "file_action_action";
+static FILE_ACTION_GROUP: &str = "file_action";
+static SET_LOG_TARGET_GROUP: &str = "set_log_action";
+static EXT_LIST_GROUP: &str = "ext_list";
+static INPUT_SOURCE_GROUP: &str = "input_source";
+static USES_STDIN_GROUP: &str = "uses_stdin";
+static DISCOVERING_SOURCE_GROUP: &str = "discovering_source";
+static DISCOVERY_CONFIG_GROUP: &str = "discovery_config_source";
 
 fn assemble_command_info() -> clap::Command {
     let mut command = clap::Command::new("duplis")
         .before_help("find duplicate files; does a dry-run by default, specify an action(which can be found below) to  change that")
         .before_long_help("Find duplicate files. You can not only check based on content, but also other(potentially platform dependant) stuff like permissions.\n By default this program simply outputs equal files, in order to actually do something, you need to specify an action like delete")
-        .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates(Defaults to '.')")
+        .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates")
             .value_hint(ValueHint::DirPath)
             .value_parser(value_parser!(std::path::PathBuf))
             .action(ArgAction::Append)
             .required(false)
+            .group(INPUT_SOURCE_GROUP)
+            .group(DISCOVERING_SOURCE_GROUP)
         )
         .arg(arg!(uncond: -u --immediate "Execute the specified action without asking")
             .action(ArgAction::SetTrue)
@@ -57,6 +61,7 @@ fn assemble_command_info() -> clap::Command {
             .action(ArgAction::SetTrue)
             .group(ACTION_MODE_GROUP)
             .group(ACTION_MODE_ACTION_GROUP)
+            .group(USES_STDIN_GROUP)
         )
         .arg(arg!(machine_readable: --wout <STRUCTURE> "Write all duplicates pairwise to stdout")
             .value_parser([
@@ -69,8 +74,9 @@ fn assemble_command_info() -> clap::Command {
             .default_missing_value(OsStr::from("pairwise"))
             .group(ACTION_MODE_GROUP)
         )
-        .arg(arg!(recurse: -r --recurse "search all listed directories recursively")
+        .arg(arg!(recurse: -r --recurse "search all listed directories recursively(requires dirs to be given via cli)")
             .action(ArgAction::SetTrue)
+            .group(DISCOVERY_CONFIG_GROUP)
         )
         .arg(arg!(setorder: -o --orderby <ORDERINGS>)
             .action(ArgAction::Append)
@@ -92,9 +98,23 @@ fn assemble_command_info() -> clap::Command {
             .value_parser(ValueParser::from(FileSizeValueParser))
             .ignore_case(true)
         )
-        .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files").action(ArgAction::SetTrue).required(false))
-        .arg(arg!(followsymlink: -s --symlink "Follow symlinks to files and directories").action(ArgAction::SetTrue).required(false))
-        .arg(arg!(numthreads: -t --threads <NUM_THREADS>"Use multi-threading(optionally provide the number of threads)").action(ArgAction::Set).required(false).require_equals(true).num_args(0..=1).value_parser(value_parser!(u32)).default_missing_value(OsString::from("0")))
+        .arg(arg!(nonzerof: -Z --nonzero "Only consider non-zero sized files")
+            .action(ArgAction::SetTrue)
+            .required(false)
+        )
+        .arg(arg!(followsymlink: -s --symlink "follow symlinks to files and directories during discovery(requires dirs to be given  via cli)")
+            .action(ArgAction::SetTrue)
+            .required(false)
+            .group(DISCOVERY_CONFIG_GROUP)
+        )
+        .arg(arg!(numthreads: -t --threads <NUM_THREADS> "Use multi-threading(optionally provide the number of threads)")
+            .action(ArgAction::Set)
+            .required(false)
+            .require_equals(true)
+            .num_args(0..=1)
+            .value_parser(value_parser!(u32))
+            .default_missing_value(OsString::from("0"))
+        )
         .arg(arg!(logtargets: --loginfo <INFO> "update the log targets(+$TARGET turns on, ~$TARGET turns off)")
             .action(ArgAction::Append)
             .value_delimiter(',')
@@ -146,8 +166,15 @@ fn assemble_command_info() -> clap::Command {
             .value_delimiter(',')
             .required(false)
         )
+        .arg(arg!(discoverstdin: --readin "reads the files which should be tested for duplication from stdin")
+            .action(ArgAction::SetTrue)
+            .group(USES_STDIN_GROUP)
+            .group(INPUT_SOURCE_GROUP)
+        )
+        .group(ArgGroup::new(INPUT_SOURCE_GROUP).required(true).multiple(true))
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
-        .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP));
+        .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP))
+        .group(ArgGroup::new(DISCOVERY_CONFIG_GROUP).requires(DISCOVERING_SOURCE_GROUP).multiple(true));
     for (name, short, long, help, _) in get_file_consume_action_args() {
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(ArgAction::SetTrue).group(FILE_ACTION_GROUP));
     }
@@ -163,7 +190,7 @@ struct PathListFileParser;
 impl clap::builder::TypedValueParser for PathListFileParser {
     type Value = Vec<PathBuf>;
 
-    fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
+    fn parse_ref(&self, cmd: &clap::Command, arg: Option<&Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
         use std::io::BufRead;
         let err_map = |err: std::io::Error| {
             let arg_text = arg.map_or(String::new(), |arg| {
@@ -234,7 +261,7 @@ fn parse_ignore_log_targets(matches: &clap::ArgMatches) -> Vec<String> {
     }
 }
 
-fn parse_path_blacklist(matches: &clap::ArgMatches) -> Option<Box<dyn FileNameFilter>> {
+fn parse_path_blacklist(matches: &clap::ArgMatches) -> Option<Box<dyn FileNameFilter + Send>> {
     let mut blacklisted = Vec::new();
     if let Some(bl) = matches.get_many::<PathBuf>("pathbl") {
         blacklisted.extend(bl);
@@ -248,6 +275,70 @@ fn parse_path_blacklist(matches: &clap::ArgMatches) -> Option<Box<dyn FileNameFi
         let filter = PathFilter::new(blacklisted.iter().map(|p| p.as_path()));
         Some(Box::new(filter))
     }
+}
+
+fn parse_file_filter(matches: &clap::ArgMatches) -> FileFilter {
+    let mut filename_filter: Vec<Box<dyn FileNameFilter + Send>> = Vec::new();
+    let mut metadata_filter: Vec<Box<dyn FileMetadataFilter + Send>> = Vec::new();
+    if let Some(filter) = matches.get_one::<FileSize>("maxfsize") {
+        metadata_filter.push(Box::new(MaxSizeFileFilter::new(filter.0)))
+    }
+    if let Some(filter) = matches.get_one::<FileSize>("minfsize") {
+        metadata_filter.push(Box::new(MinSizeFileFilter::new(filter.0.saturating_sub(1))))
+    }
+    if matches.get_flag("nonzerof") {
+        metadata_filter.push(Box::new(MinSizeFileFilter::new(0)))
+    }
+    fn gather_exts<'a>(exts: impl Iterator<Item=&'a OsString>) -> (HashSet<OsString>, bool) {
+        let mut exts_col = HashSet::with_capacity(exts.size_hint().0);
+        let mut no_ext = false;
+        let curly = OsString::from("~");
+        for ext in exts {
+            if ext == &curly {
+                no_ext = true;
+            } else {
+                exts_col.insert(ext.clone());
+            }
+        }
+        (exts_col, no_ext)
+    }
+    if let Some(exts) = matches.get_many::<OsString>("extbl") {
+        let (exts, no_ext) = gather_exts(exts);
+        let filter = ExtensionFilter::new(exts, no_ext, false);
+        filename_filter.push(Box::new(filter));
+    }
+    if let Some(exts) = matches.get_many::<OsString>("extwl") {
+        let (exts, no_ext) = gather_exts(exts);
+        let filter = ExtensionFilter::new(exts, no_ext, true);
+        filename_filter.push(Box::new(filter));
+    }
+    if let Some(filter) = parse_path_blacklist(&matches) {
+        filename_filter.push(filter)
+    }
+    FileFilter(filename_filter.into_boxed_slice(), metadata_filter.into_boxed_slice())
+}
+
+fn parse_input_source(matches: &clap::ArgMatches) -> Vec<Box<dyn InputSource>> {
+    let mut input_source: Vec<Box<dyn InputSource>> = Vec::new();
+
+    let recurse = matches.get_flag("recurse");
+    let follow_symlinks = matches.get_flag("followsymlink");
+    let read_from_stdin = matches.get_flag("discoverstdin");
+
+    let dirs = parse_directories(&matches);
+
+    let file_filter = parse_file_filter(matches);
+
+    if !dirs.is_empty() {
+        let source = DiscoveringInputSource::new(recurse, follow_symlinks, dirs, file_filter.clone());
+        input_source.push(Box::new(source))
+    }
+
+    if read_from_stdin {
+        input_source.push(Box::new(StdInSource::new(file_filter)))
+    }
+
+    input_source
 }
 
 fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
@@ -307,60 +398,13 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         .get_matches();
     //let x = matches.get_many::<usize>("oi").unwrap();
 
-    let mut dirs = parse_directories(&matches);
-    let mut rec_dirs = vec![];
-
-    let file_filter = {
-        let mut filename_filter: Vec<Box<dyn FileNameFilter>> = Vec::new();
-        let mut metadata_filter: Vec<Box<dyn FileMetadataFilter>> = Vec::new();
-        if let Some(filter) = matches.get_one::<FileSize>("maxfsize") {
-            metadata_filter.push(Box::new(MaxSizeFileFilter::new(filter.0)))
-        }
-        if let Some(filter) = matches.get_one::<FileSize>("minfsize") {
-            metadata_filter.push(Box::new(MinSizeFileFilter::new(filter.0.saturating_sub(1))))
-        }
-        if matches.get_flag("nonzerof") {
-            metadata_filter.push(Box::new(MinSizeFileFilter::new(0)))
-        }
-        fn gather_exts<'a>(exts: impl Iterator<Item=&'a OsString>) -> (HashSet<OsString>, bool) {
-            let mut exts_col = HashSet::with_capacity(exts.size_hint().0);
-            let mut no_ext = false;
-            let curly = OsString::from("~");
-            for ext in exts {
-                if ext == &curly {
-                    no_ext = true;
-                } else {
-                    exts_col.insert(ext.clone());
-                }
-            }
-            (exts_col, no_ext)
-        }
-        if let Some(exts) = matches.get_many::<OsString>("extbl") {
-            let (exts, no_ext) = gather_exts(exts);
-            let filter = ExtensionFilter::new(exts, no_ext, false);
-            filename_filter.push(Box::new(filter));
-        }
-        if let Some(exts) = matches.get_many::<OsString>("extwl") {
-            let (exts, no_ext) = gather_exts(exts);
-            let filter = ExtensionFilter::new(exts, no_ext, true);
-            filename_filter.push(Box::new(filter));
-        }
-        if let Some(filter) = parse_path_blacklist(&matches) {
-            filename_filter.push(filter)
-        }
-        FileFilter(filename_filter.into_boxed_slice(), metadata_filter.into_boxed_slice())
-    };
-
     let num_threads = match matches.get_one::<u32>("numthreads") {
         Some(0) => {
-            u32::try_from(std::thread::available_parallelism().map_or(1, NonZeroUsize::get).saturating_mul(2)).unwrap_or(u32::MAX)
+            u32::try_from(std::thread::available_parallelism().map_or(1, NonZeroUsize::get).saturating_mul(2)).unwrap_or(1)
         }
         Some(num) => *num,
         None => 1
     };
-
-    let recurse = matches.get_flag("recurse");
-    let follow_symlinks = matches.get_flag("followsymlink");
 
     let set_ordering = parse_set_order(&matches);
 
@@ -391,25 +435,17 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         Box::new(DryRun::for_console())
     };
 
-    let (dirs, recursive_dirs) = if recurse {
-        rec_dirs.append(&mut dirs);
-        (dirs, rec_dirs)
-    } else {
-        (dirs, rec_dirs)
-    };
+    let input_sources = parse_input_source(&matches);
 
     let ignore_log_set = parse_ignore_log_targets(&matches);
 
     let plan = ExecutionPlan {
-        dirs,
-        recursive_dirs,
-        follow_symlinks,
         file_equals,
         order_set: set_ordering,
         action: file_set_consumer,
-        file_filter,
         num_threads: NonZeroU32::new(num_threads).unwrap(),
         ignore_log_set,
+        input_sources,
     };
     Ok(plan)
 }

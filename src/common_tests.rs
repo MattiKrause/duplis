@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
-use crate::file_filters::{ExtensionFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
+use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
 use crate::HashedFile;
+use crate::input_source::{DiscoveringInputSource, InputSink, InputSource};
 use crate::set_consumer::{FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
 use crate::util::LinkedPath;
@@ -390,4 +391,38 @@ fn test_interactive_set_action() {
 
     let mut writer = InteractiveEachChoice::new(read_source, &mut write_sink, Box::new(expected()));
     writer.consume_set(files).unwrap();
+}
+
+#[test]
+fn test_discovery_source() {
+    let mut prefix = CommonPrefix::new("discovery_source/");
+    let file0 = prefix.create_file("a/file_1.a", &[]);
+    let file1 = prefix.create_file("a/file_2.b", &[]);
+    let file2 = prefix.create_file("a/sub/file_3.a", &[]);
+    let file3 = prefix.create_file("a/sub/file_4.b", &[]);
+
+    let files = [&file0, &file1, &file2, &file3].into_iter().map(|(_, p)| p.clone()).collect::<Vec<_>>();
+
+    let a_source = LinkedPath::from_path_buf("test_files/discovery_source/a".as_ref());
+    let empty_filter = FileFilter(Box::new([]), Box::new([]));
+
+    fn test_input(expected: Vec<LinkedPath>, mut source: impl InputSource) {
+        let (s, r) = flume::unbounded();
+
+        let mut sink = InputSink::new(s);
+
+        source.consume_all(&mut sink).unwrap();
+        drop(sink);
+        let actual = r.iter().collect::<HashSet<_>>();
+        let expected = expected.into_iter().collect::<HashSet<_>>();
+        assert_eq!(expected, actual)
+    }
+
+    let disc = DiscoveringInputSource::new(false, false, vec![a_source.clone()], empty_filter.clone());
+    test_input(permute(&files, &[0, 1]), disc);
+    let disc = DiscoveringInputSource::new(true, false, vec![a_source.clone()], empty_filter.clone());
+    test_input(permute(&files, &[0, 1, 2, 3]), disc);
+    let filter: Box<dyn FileNameFilter + Send> = Box::new(ExtensionFilter::new(HashSet::from([OsString::from("a")]), false, true));
+    let disc = DiscoveringInputSource::new(true, false, vec![a_source.clone()], FileFilter(vec![filter].into_boxed_slice(), Box::new([])));
+    test_input(permute(&files, &[0, 2]), disc);
 }

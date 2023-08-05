@@ -34,7 +34,7 @@ impl <'a> ChoiceInputReader for &'a [u8] {
     }
 }
 
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
 impl LinkedPath {
     pub fn new_child(parent: &Arc<LinkedPath>, segment: OsString) -> Self {
@@ -86,4 +86,18 @@ pub fn path_contains_comma(path: &Path) -> bool {
     return {
         path.as_os_str().to_string_lossy().contains(',')
     }
+}
+
+/// Used to temporarily append a segment to a path, while guaranteeing, that that segment is popped off again
+pub struct TemporarySegmentToken<'a>(pub &'a mut PathBuf);
+
+impl<'a> Drop for TemporarySegmentToken<'a> {
+    fn drop(&mut self) {
+        self.0.pop();
+    }
+}
+
+pub fn push_to_path<'a>(path: &'a mut PathBuf, segment: &OsString) -> TemporarySegmentToken<'a> {
+    path.push(segment);
+    TemporarySegmentToken(path)
 }

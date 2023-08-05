@@ -14,22 +14,20 @@ mod file_action;
 #[cfg(test)]
 mod common_tests;
 mod logger;
+mod input_source;
 
-
-use std::ffi::{OsString};
 use std::io::stderr;
 use std::ops::DerefMut;
 
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
 use dashmap::DashMap;
 
 use log::{LevelFilter};
 use crate::error_handling::AlreadyReportedError;
-use crate::file_filters::FileFilter;
 use crate::file_set_refiner::{FileSetRefiners};
+use crate::input_source::{InputSink};
 
 
 use crate::parse_cli::ExecutionPlan;
@@ -65,7 +63,7 @@ pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
     // the data required to run the program
-    let ExecutionPlan { dirs, recursive_dirs, follow_symlinks, file_equals, mut order_set, action: mut file_set_action, mut file_filter, num_threads, ignore_log_set } = parse_cli::parse().unwrap();
+    let ExecutionPlan { file_equals, mut order_set, action: mut file_set_action, num_threads, ignore_log_set, input_sources } = parse_cli::parse().unwrap();
 
     logger::DuplisLogger::init(ignore_log_set, LevelFilter::Trace, Box::new(stderr())).unwrap();
 
@@ -90,19 +88,12 @@ fn main() {
                 }
             }
         }
-        for dir in dirs {
-            find_files(dir, &mut file_filter, false, follow_symlinks, |file| {
-                files_send.send(file).expect("sink leads to nowhere; this should not happen")
-            });
+        let mut input_sink = InputSink::new(files_send);
+        for mut source in input_sources {
+            let _ = source.consume_all(&mut input_sink);
         }
 
-        for dir in recursive_dirs {
-            find_files(dir, &mut file_filter, true, follow_symlinks, |file| {
-                files_send.send(file).expect("sink leads to nowhere; this should not happen")
-            });
-        }
-
-        drop(files_send);
+        drop(input_sink);
 
         if num_threads.get() == 1 {
             place_files_to_set(set_refiners, files_rev, &target);
@@ -127,83 +118,6 @@ fn main() {
     }
 }
 
-macro_rules! handle_access_dir {
-    ($result: expr, $dir: expr, $action: expr) => {
-        match $result {
-            Ok(dir) => dir,
-            Err(err) => {
-                log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to access directory {}: {err}", $dir.display());
-                $action
-            }
-        }
-    };
-}
-
-// find all files that need to be handled
-fn find_files(path: Arc<LinkedPath>, file_filter: &mut FileFilter, recursive: bool, follow_symlink: bool, mut write_target: impl FnMut(LinkedPath)) {
-    macro_rules! handle_get_file_type {
-        ($result: expr, $path: expr, $file_name: expr, $on_err: expr) => {{
-            match $result {
-                Ok(ft) => ft,
-                Err(err) => {
-                    if log::log_enabled!(log::Level::Trace) {
-                        $path.push($file_name);
-                        log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to access {}: {err}", $path.display());
-                        $path.pop();
-                    }
-                    $on_err
-                }
-            }
-        }};
-    }
-    macro_rules! handle_follow_symlink {
-        ($result: expr, $path:expr,  $on_err: expr) => {
-            match $result {
-                    Ok(md) => md,
-                    Err(err) => {
-                        log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to follow symlink {}: {err}", $path.display());
-                        $on_err
-                    }
-            }
-        };
-    }
-    let mut dir_list = vec![path];
-
-    let mut path_acc = PathBuf::new();
-    while let Some(dir) = dir_list.pop() {
-        dir.write_full_to_buf(&mut path_acc);
-        let current_dir = handle_access_dir!(std::fs::read_dir(&path_acc), path_acc, continue);
-        for entry in current_dir {
-            let entry = handle_access_dir!(entry, path_acc, break);
-            let file_type = handle_get_file_type!(entry.file_type(), path_acc, entry.file_name(), continue);
-            if file_type.is_file() {
-                let file_name = entry.file_name();
-                let pop_token = push_to_path(&mut path_acc, &file_name);
-                let file_name = LinkedPath::new_child(&dir, file_name);
-                let keep_file = file_filter.keep_file_dir_entry(&file_name, pop_token.0, entry);
-                if keep_file {
-                    write_target(file_name);
-                }
-            } else if file_type.is_dir() && recursive {
-                dir_list.push(Arc::new(LinkedPath::new_child(&dir, entry.file_name())));
-            } else if file_type.is_symlink() && follow_symlink {
-                let entry_name = entry.file_name();
-                let pop_token = push_to_path(&mut path_acc, &entry_name);
-                let metadata = handle_follow_symlink!(std::fs::metadata(&pop_token.0), pop_token.0, continue);
-                let entry_name = LinkedPath::new_child(&dir, entry_name);
-                if metadata.is_file() {
-                    let keep_file = file_filter.keep_file_md(&entry_name, pop_token.0, &metadata);
-                    if keep_file {
-                        write_target(entry_name)
-                    }
-                } else if metadata.is_dir() && recursive {
-                    dir_list.push(Arc::new(entry_name))
-                }
-            }
-        }
-    }
-}
-
 fn place_files_to_set(mut set_refiners: FileSetRefiners, files: flume::Receiver<LinkedPath>, target: &DashMap<u128, Vec<(u128, Vec<HashedFile>)>>) {
     let mut path_buf = PathBuf::new();
     let mut path_buf_tmp = PathBuf::new();
@@ -215,20 +129,6 @@ fn place_files_to_set(mut set_refiners: FileSetRefiners, files: flume::Receiver<
             continue;
         }
     }
-}
-
-/// Used to temporarily append a segment to a path, while guaranteeing, that that segment is popped off again
-struct TemporarySegmentToken<'a>(&'a mut PathBuf);
-
-impl<'a> Drop for TemporarySegmentToken<'a> {
-    fn drop(&mut self) {
-        self.0.pop();
-    }
-}
-
-fn push_to_path<'a>(path: &'a mut PathBuf, segment: &OsString) -> TemporarySegmentToken<'a> {
-    path.push(segment);
-    TemporarySegmentToken(path)
 }
 
 fn place_into_file_set<'s, R, F>(
