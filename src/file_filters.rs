@@ -1,17 +1,22 @@
+use crate::util::LinkedPath;
+use crate::{dyn_clone_impl, handle_file_op};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::Metadata;
 use std::path::Path;
 use std::sync::Arc;
-use crate::{dyn_clone_impl, handle_file_op};
-use crate::util::LinkedPath;
 
-pub struct FileFilter(pub Box<[Box<dyn FileNameFilter + Send>]>, pub Box<[Box<dyn FileMetadataFilter + Send>]>);
+pub struct FileFilter(
+    pub Box<[Box<dyn FileNameFilter + Send>]>,
+    pub Box<[Box<dyn FileMetadataFilter + Send>]>,
+);
 
 impl FileFilter {
     fn filter_name(&mut self, name: &LinkedPath, name_path: &Path) -> bool {
         for name_filter in &mut *self.0 {
-            let result = name_filter.filter_file_name(name, name_path).unwrap_or(false);
+            let result = name_filter
+                .filter_file_name(name, name_path)
+                .unwrap_or(false);
             if !result {
                 return false;
             }
@@ -19,9 +24,16 @@ impl FileFilter {
         true
     }
 
-    fn filter_metadata(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> bool {
+    fn filter_metadata(
+        &mut self,
+        name: &LinkedPath,
+        name_path: &Path,
+        metadata: &Metadata,
+    ) -> bool {
         for metadata_filter in &mut *self.1 {
-            let result = metadata_filter.filter_file_metadata(name, name_path, metadata).unwrap_or(false);
+            let result = metadata_filter
+                .filter_file_metadata(name, name_path, metadata)
+                .unwrap_or(false);
             if !result {
                 return false;
             }
@@ -43,14 +55,24 @@ impl FileFilter {
     }
 
     /// run the file through all filters with the metadata provided
-    pub fn keep_file_md(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> bool {
+    pub fn keep_file_md(
+        &mut self,
+        name: &LinkedPath,
+        name_path: &Path,
+        metadata: &Metadata,
+    ) -> bool {
         if !self.filter_name(name, name_path) {
             return false;
         }
         self.filter_metadata(name, name_path, metadata)
     }
 
-    pub fn keep_file_dir_entry(&mut self, name: &LinkedPath, name_path: &Path, entry: &std::fs::DirEntry) -> bool {
+    pub fn keep_file_dir_entry(
+        &mut self,
+        name: &LinkedPath,
+        name_path: &Path,
+        entry: &std::fs::DirEntry,
+    ) -> bool {
         if cfg!(windows) {
             let Ok(metadata) = entry.metadata() else { return false; };
             self.keep_file_md(name, name_path, &metadata)
@@ -62,8 +84,18 @@ impl FileFilter {
 
 impl Clone for FileFilter {
     fn clone(&self) -> Self {
-        let named = self.0.iter().map(|f| f.dyn_clone()).collect::<Vec<_>>().into_boxed_slice();
-        let metadata = self.1.iter().map(|f| f.dyn_clone()).collect::<Vec<_>>().into_boxed_slice();
+        let named = self
+            .0
+            .iter()
+            .map(|f| f.dyn_clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let metadata = self
+            .1
+            .iter()
+            .map(|f| f.dyn_clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self(named, metadata)
     }
 }
@@ -75,7 +107,12 @@ pub trait FileNameFilter: FileNameFilterDynClone {
 
 /// Filters files based on the name and metadata
 pub trait FileMetadataFilter: FileMetadataFilterDynClone {
-    fn filter_file_metadata(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> Result<bool, ()>;
+    fn filter_file_metadata(
+        &mut self,
+        name: &LinkedPath,
+        name_path: &Path,
+        metadata: &Metadata,
+    ) -> Result<bool, ()>;
 }
 
 dyn_clone_impl!(FileNameFilterDynClone, FileNameFilter);
@@ -111,7 +148,12 @@ impl MinSizeFileFilter {
 }
 
 impl FileMetadataFilter for MinSizeFileFilter {
-    fn filter_file_metadata(&mut self, _: &LinkedPath, _: &Path, metadata: &Metadata) -> Result<bool, ()> {
+    fn filter_file_metadata(
+        &mut self,
+        _: &LinkedPath,
+        _: &Path,
+        metadata: &Metadata,
+    ) -> Result<bool, ()> {
         Ok(metadata.len() > self.0)
     }
 }
@@ -123,31 +165,45 @@ impl MaxSizeFileFilter {
 }
 
 impl FileMetadataFilter for MaxSizeFileFilter {
-    fn filter_file_metadata(&mut self, _: &LinkedPath, _: &Path, metadata: &Metadata) -> Result<bool, ()> {
+    fn filter_file_metadata(
+        &mut self,
+        _: &LinkedPath,
+        _: &Path,
+        metadata: &Metadata,
+    ) -> Result<bool, ()> {
         Ok(metadata.len() < self.0)
     }
 }
 
 impl ExtensionFilter {
-    pub(crate) fn new(extensions: HashSet<OsString>, no_extension_in_set: bool, positive: bool) -> Self {
-        Self { extensions: Arc::new(extensions), no_ext_in_set: no_extension_in_set, positive }
+    pub(crate) fn new(
+        extensions: HashSet<OsString>,
+        no_extension_in_set: bool,
+        positive: bool,
+    ) -> Self {
+        Self {
+            extensions: Arc::new(extensions),
+            no_ext_in_set: no_extension_in_set,
+            positive,
+        }
     }
 }
 
 impl FileNameFilter for ExtensionFilter {
     fn filter_file_name(&mut self, _: &LinkedPath, name_path: &Path) -> Result<bool, ()> {
-        Ok(name_path.extension().map_or(self.no_ext_in_set, |ext| self.extensions.contains(ext)) ^ !self.positive)
+        Ok(name_path
+            .extension()
+            .map_or(self.no_ext_in_set, |ext| self.extensions.contains(ext))
+            ^ !self.positive)
     }
 }
 
 impl PathFilter {
-    pub(crate) fn new<'p>(paths: impl Iterator<Item=&'p Path>) -> Self {
+    pub(crate) fn new<'p>(paths: impl Iterator<Item = &'p Path>) -> Self {
         let mut root = PathFilterTree(HashMap::new());
-        'path_loop:
-        for path in paths {
+        'path_loop: for path in paths {
             let mut current = &mut root;
             if let Some(parent) = path.parent() {
-
                 for seg in parent.iter() {
                     if current.0.contains_key(seg) {
                         let entry = current.0.get_mut(seg).unwrap().as_mut();
@@ -158,7 +214,10 @@ impl PathFilter {
                             continue 'path_loop;
                         }
                     } else {
-                        current = current.0.entry(seg.to_os_string()).or_insert(Some(PathFilterTree(HashMap::new())))
+                        current = current
+                            .0
+                            .entry(seg.to_os_string())
+                            .or_insert(Some(PathFilterTree(HashMap::new())))
                             .as_mut()
                             .unwrap();
                     }
@@ -178,7 +237,7 @@ impl FileNameFilter for PathFilter {
             let Some(entry) = current.0.get(seg) else { return Ok(true); };
             match entry.as_ref() {
                 Some(next) => current = next,
-                None => return Ok(false)
+                None => return Ok(false),
             }
         }
         Ok(true)

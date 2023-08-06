@@ -8,7 +8,7 @@ macro_rules! dyn_clone_impl {
             fn dyn_clone(&self) -> Box<dyn $tname + Send>;
         }
 
-        impl <T: 'static + $tname + Clone + Send> $dcname for T {
+        impl<T: 'static + $tname + Clone + Send> $dcname for T {
             fn dyn_clone(&self) -> Box<dyn $tname + Send> {
                 Box::new(self.clone())
             }
@@ -27,7 +27,7 @@ impl ChoiceInputReader for std::io::Stdin {
     }
 }
 
-impl <'a> ChoiceInputReader for &'a [u8] {
+impl<'a> ChoiceInputReader for &'a [u8] {
     fn read_remaining(&mut self, buf: &mut String) -> std::io::Result<()> {
         use std::io::BufRead;
         self.read_line(buf).map(|_| ())
@@ -62,7 +62,8 @@ impl LinkedPath {
     }
 
     pub fn from_path_buf(buf: &Path) -> Arc<Self> {
-        buf.iter().map(ToOwned::to_owned)
+        buf.iter()
+            .map(ToOwned::to_owned)
             .fold(None, |acc, res| Some(Arc::new(LinkedPath(acc, res))))
             .expect("empty path")
     }
@@ -85,9 +86,7 @@ pub fn path_contains_comma(path: &Path) -> bool {
         path.as_os_str().as_bytes().contains(&b',')
     };
     #[cfg(not(unix))]
-    return {
-        path.as_os_str().to_string_lossy().contains(',')
-    }
+    return { path.as_os_str().to_string_lossy().contains(',') };
 }
 
 /// Used to temporarily append a segment to a path, while guaranteeing, that that segment is popped off again

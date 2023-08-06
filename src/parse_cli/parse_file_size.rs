@@ -1,7 +1,9 @@
-use std::ffi::OsStr;
 use clap::builder::{PossibleValuesParser, StringValueParser, TypedValueParser};
-use clap::{Arg};
-use clap::error::{ErrorKind as ClapErrorKind, ContextKind as ClapContextKind, ContextValue as ClapContextValue};
+use clap::error::{
+    ContextKind as ClapContextKind, ContextValue as ClapContextValue, ErrorKind as ClapErrorKind,
+};
+use clap::Arg;
+use std::ffi::OsStr;
 
 #[derive(Clone)]
 pub(crate) struct FileSize(pub u64);
@@ -13,20 +15,30 @@ pub(crate) struct FileSizeValueParser;
 impl TypedValueParser for FileSizeValueParser {
     type Value = FileSize;
 
-    fn parse_ref(&self, cmd: &clap::Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, clap::Error> {
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
         let value = StringValueParser::new().parse_ref(cmd, arg, value)?;
 
         let (off, ranges, radix) = if value.starts_with("0b") | value.starts_with("0B") {
-            (2, [(0, b'0',b'1' + 1)].as_slice(), 2)
+            (2, [(0, b'0', b'1' + 1)].as_slice(), 2)
         } else if value.starts_with("0x") | value.starts_with("0X") {
-            (2, [(0, b'0', b'9' + 1), (10, b'A', b'F' + 1)].as_slice(), 16)
+            (
+                2,
+                [(0, b'0', b'9' + 1), (10, b'A', b'F' + 1)].as_slice(),
+                16,
+            )
         } else if value.starts_with("0o") | value.starts_with("0O") {
             (2, [(0, b'0', b'7' + 1)].as_slice(), 8)
         } else {
             (0, [(0, b'0', b'9' + 1)].as_slice(), 10)
         };
 
-        let (fs_literal, rem) = parse_number_prefix(&value[off..], ranges, radix).map_err(|err|format_int_err(err, cmd,  arg))?;
+        let (fs_literal, rem) = parse_number_prefix(&value[off..], ranges, radix)
+            .map_err(|err| format_int_err(err, cmd, arg))?;
 
         macro_rules! supported_suffixes {
             ($pasuf: ident, $suffixes: ident, $($n: literal => $e: expr),*) => {
@@ -40,22 +52,23 @@ impl TypedValueParser for FileSizeValueParser {
             };
         }
         supported_suffixes!(parse_suffix, suffixes,
-                "" => 1,
-                "kb" => 10u64.pow(3),
-                "kib" => 2u64.pow(10),
-                "mb" => 10u64.pow(6),
-                "mib" => 2u64.pow(20),
-                "gb" => 10u64.pow(9),
-                "gib" => 2u64.pow(30),
-                "tb" => 10u64.pow(12),
-                "tib" => 2u64.pow(40),
-                "pb" => 10u64.pow(15),
-                "pib" => 2u64.pow(50)
-            );
-        let file_size_mod= PossibleValuesParser::new(suffixes)
+            "" => 1,
+            "kb" => 10u64.pow(3),
+            "kib" => 2u64.pow(10),
+            "mb" => 10u64.pow(6),
+            "mib" => 2u64.pow(20),
+            "gb" => 10u64.pow(9),
+            "gib" => 2u64.pow(30),
+            "tb" => 10u64.pow(12),
+            "tib" => 2u64.pow(40),
+            "pb" => 10u64.pow(15),
+            "pib" => 2u64.pow(50)
+        );
+        let file_size_mod = PossibleValuesParser::new(suffixes)
             .map(|suffix| parse_suffix(&suffix))
             .parse_ref(cmd, arg, rem.as_ref())?;
-        let final_file_size = fs_literal.checked_mul(file_size_mod)
+        let final_file_size = fs_literal
+            .checked_mul(file_size_mod)
             .ok_or(ParseIntError::Overflow)
             .map_err(|err| format_int_err(err, cmd, arg))?;
         Ok(FileSize(final_file_size))
@@ -64,19 +77,26 @@ impl TypedValueParser for FileSizeValueParser {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 enum ParseIntError {
-    Overflow
+    Overflow,
 }
 
 fn format_int_err(err: ParseIntError, cmd: &clap::Command, arg: Option<&Arg>) -> clap::Error {
     let arg = arg.map(std::string::ToString::to_string);
     let literal_style = cmd.get_styles().get_literal();
     let for_arg_txt = if let Some(arg) = &arg {
-        format!(" for arg '{}{arg}{}'", literal_style.render(), literal_style.render_reset())
+        format!(
+            " for arg '{}{arg}{}'",
+            literal_style.render(),
+            literal_style.render_reset()
+        )
     } else {
         String::new()
     };
     let mut err = match err {
-        ParseIntError::Overflow => clap::Error::raw(ClapErrorKind::InvalidValue, format!("The given file size{for_arg_txt} size is too large to be represented\n"))
+        ParseIntError::Overflow => clap::Error::raw(
+            ClapErrorKind::InvalidValue,
+            format!("The given file size{for_arg_txt} size is too large to be represented\n"),
+        ),
     };
     if let Some(arg) = arg {
         err.insert(ClapContextKind::InvalidArg, ClapContextValue::String(arg));
@@ -85,7 +105,11 @@ fn format_int_err(err: ParseIntError, cmd: &clap::Command, arg: Option<&Arg>) ->
 }
 
 /// parse a number and return the remaining text
-fn parse_number_prefix<'t>(text: &'t str, char_ranges: &'static [(u8,u8, u8)], radix: u8) -> Result<(u64, &'t str), ParseIntError> {
+fn parse_number_prefix<'t>(
+    text: &'t str,
+    char_ranges: &'static [(u8, u8, u8)],
+    radix: u8,
+) -> Result<(u64, &'t str), ParseIntError> {
     let mut acc = 0u64;
     let mut chars = text.char_indices();
 
@@ -118,11 +142,16 @@ fn test_num_parse() {
         ("011312", 11312),
         ("0xFeF", 0xfef),
         ("0x1eb", 0x1eb),
-        ("0o0123kb", 0o123*1000),
-        ("0xAFmIb", 0xAF*2u64.pow(20))
+        ("0o0123kb", 0o123 * 1000),
+        ("0xAFmIb", 0xAF * 2u64.pow(20)),
     ];
     let command = clap::Command::new("test")
-        .arg(clap::Arg::new("nums").action(clap::ArgAction::Append).value_parser(clap::builder::ValueParser::from(FileSizeValueParser)).ignore_case(true))
+        .arg(
+            clap::Arg::new("nums")
+                .action(clap::ArgAction::Append)
+                .value_parser(clap::builder::ValueParser::from(FileSizeValueParser))
+                .ignore_case(true),
+        )
         .no_binary_name(true);
     let (strs, expected) = samples.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
     let matches = command.get_matches_from(strs);
@@ -132,15 +161,21 @@ fn test_num_parse() {
 
 #[test]
 fn test_num_prefix() {
-    let result = parse_number_prefix("1923123basdjas", [(0, b'0', b'9' + 1)].as_slice(),10).unwrap();
+    let result =
+        parse_number_prefix("1923123basdjas", [(0, b'0', b'9' + 1)].as_slice(), 10).unwrap();
     assert_eq!(result, (1923123, "basdjas"));
     let result = parse_number_prefix("00", [(0, b'0', b'9' + 1)].as_slice(), 10).unwrap();
     assert_eq!(result, (0, ""));
     let result = parse_number_prefix("413lpik", [(0, b'0', b'7' + 1)].as_slice(), 8).unwrap();
     assert_eq!(result, (0o413, "lpik"));
-    let result = parse_number_prefix("01012345", [(0, b'0', b'1' + 1)].as_slice(),2).unwrap();
+    let result = parse_number_prefix("01012345", [(0, b'0', b'1' + 1)].as_slice(), 2).unwrap();
     assert_eq!(result, (0b0101, "2345"));
-    let result = parse_number_prefix("184467440737095516151basd", [(0, b'0', b'9' + 1)].as_slice(), 10).unwrap_err();
+    let result = parse_number_prefix(
+        "184467440737095516151basd",
+        [(0, b'0', b'9' + 1)].as_slice(),
+        10,
+    )
+    .unwrap_err();
     assert!(matches!(result, ParseIntError::Overflow));
     let hexrange = [(0, b'0', b'9' + 1), (10, b'A', b'F' + 1)].as_slice();
     let result = parse_number_prefix("9Eefx", hexrange, 16).unwrap();

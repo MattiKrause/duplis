@@ -1,7 +1,7 @@
-use std::borrow::Cow;
-use std::path::Path;
 use crate::error_handling::AlreadyReportedError;
 use crate::{handle_file_op, Recoverable};
+use std::borrow::Cow;
+use std::path::Path;
 
 pub trait FileConsumeAction {
     /// consumes the file pointed to by `path`
@@ -22,19 +22,19 @@ pub type FileConsumeResult = Result<(), Recoverable<AlreadyReportedError, Alread
 #[derive(Default)]
 pub struct DebugFileAction {
     // make file only constructable with new method
-    _p: ()
+    _p: (),
 }
 /// delete the given file
 #[derive(Default)]
 pub struct DeleteFileAction {
     // make file only constructable with new method
-    _p: ()
+    _p: (),
 }
 /// replace the file with a hard link to the 'original' file
 #[derive(Default)]
 pub struct ReplaceWithHardLinkFileAction {
     // make file only constructable with new method
-    _p: ()
+    _p: (),
 }
 
 /// report a successful file action
@@ -64,7 +64,11 @@ impl FileConsumeAction for DebugFileAction {
 
 impl FileConsumeAction for DeleteFileAction {
     fn consume(&mut self, path: &Path, _original: Option<&Path>) -> FileConsumeResult {
-        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
+        handle_file_op!(
+            std::fs::remove_file(path),
+            path,
+            return Err(Recoverable::Recoverable(AlreadyReportedError))
+        );
         report_file_action!("deleted file {}", path.display());
         Ok(())
     }
@@ -85,13 +89,26 @@ impl FileConsumeAction for DeleteFileAction {
 impl FileConsumeAction for ReplaceWithHardLinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
         let original = original.expect("original required");
-        handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
+        handle_file_op!(
+            std::fs::remove_file(path),
+            path,
+            return Err(Recoverable::Recoverable(AlreadyReportedError))
+        );
         if let Err(err) = std::fs::hard_link(original, path) {
-            log::error!(target: crate::error_handling::ACTION_FATAL_FAILURE_TARGET, "FATAL ERROR: failed to create hard link to {} from {} due to error {err}", path.display(), original.display());
+            log::error!(
+                target: crate::error_handling::ACTION_FATAL_FAILURE_TARGET,
+                "FATAL ERROR: failed to create hard link to {} from {} due to error {err}",
+                path.display(),
+                original.display()
+            );
             // Something is absolutely not right here, continuing means risk of data loss
             return Err(Recoverable::Fatal(AlreadyReportedError));
         }
-        report_file_action!("replaced {} with a hard link to {}", path.display(), original.display());
+        report_file_action!(
+            "replaced {} with a hard link to {}",
+            path.display(),
+            original.display()
+        );
         Ok(())
     }
 

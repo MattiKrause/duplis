@@ -3,24 +3,35 @@ mod parse_number;
 
 pub use parse_number::UNumberParser;
 
+use crate::error_handling::get_all_log_targets;
+use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, TypedValueParser, ValueParser};
+use clap::{arg, value_parser, ArgAction, ArgGroup, ValueHint};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use clap::{arg, ArgAction, ArgGroup, value_parser, ValueHint};
-use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, TypedValueParser, ValueParser};
-use crate::error_handling::get_all_log_targets;
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
-use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
+use crate::file_filters::{
+    ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter,
+    MinSizeFileFilter, PathFilter,
+};
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 use crate::input_source::{DiscoveringInputSource, InputSource, StdInSource};
 
-use crate::os::{complex_cmd_config, complex_parse_file_metadata_filters, FileNameFilterArg, SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
+use crate::os::{
+    complex_cmd_config, complex_parse_file_metadata_filters, FileNameFilterArg, SetOrderOption,
+    SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg,
+};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
-use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
-use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
+use crate::set_consumer::{
+    DryRun, FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet,
+    UnconditionalAction,
+};
+use crate::set_order::{
+    CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder,
+};
 use crate::util::LinkedPath;
 
 pub struct ExecutionPlan {
@@ -192,14 +203,38 @@ fn assemble_command_info() -> clap::Command {
 }
 
 struct SimpleArgDeclaration<T> {
-    name: &'static str , short: Option<char>, long: &'static str, help: String, is_default: bool, action: T
+    name: &'static str,
+    short: Option<char>,
+    long: &'static str,
+    help: String,
+    is_default: bool,
+    action: T,
 }
 
-fn apply_all_args<T>(mut command: clap::Command, args: impl Iterator<Item = SimpleArgDeclaration<T>>) -> clap::Command {
-    for SimpleArgDeclaration { name, short, long, help, is_default, action: _ } in args {
-        command = command.arg(clap::Arg::new(name).short(short).long(long).help(help)
-            .action(if is_default { ArgAction::SetFalse } else { ArgAction::SetTrue }));
-
+fn apply_all_args<T>(
+    mut command: clap::Command,
+    args: impl Iterator<Item = SimpleArgDeclaration<T>>,
+) -> clap::Command {
+    for SimpleArgDeclaration {
+        name,
+        short,
+        long,
+        help,
+        is_default,
+        action: _,
+    } in args
+    {
+        command = command.arg(
+            clap::Arg::new(name)
+                .short(short)
+                .long(long)
+                .help(help)
+                .action(if is_default {
+                    ArgAction::SetFalse
+                } else {
+                    ArgAction::SetTrue
+                }),
+        );
     }
     command
 }
@@ -210,18 +245,36 @@ struct PathListFileParser;
 impl clap::builder::TypedValueParser for PathListFileParser {
     type Value = Vec<PathBuf>;
 
-    fn parse_ref(&self, cmd: &clap::Command, arg: Option<&clap::Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
         use std::io::BufRead;
         let err_map = |err: std::io::Error| {
             let arg_text = arg.map_or(String::new(), |arg| {
                 let literal = cmd.get_styles().get_literal();
-                format!("(for '{}{arg}{}')", literal.render(), literal.render_reset())
+                format!(
+                    "(for '{}{arg}{}')",
+                    literal.render(),
+                    literal.render_reset()
+                )
             });
             let err_style = cmd.get_styles().get_error();
-            clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to open path file({arg_text}) {value:?}: {}{err}{}\n", err_style.render(), err_style.render_reset()))
-                .with_cmd(cmd)
+            clap::Error::raw(
+                clap::error::ErrorKind::Io,
+                format!(
+                    "failed to open path file({arg_text}) {value:?}: {}{err}{}\n",
+                    err_style.render(),
+                    err_style.render_reset()
+                ),
+            )
+            .with_cmd(cmd)
         };
-        let file = std::fs::OpenOptions::new().read(true).open(value)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(value)
             .map_err(err_map)?;
         let mut paths = std::io::BufReader::new(file)
             .lines()
@@ -251,31 +304,65 @@ pub struct CanonicalPathValueParser;
 impl TypedValueParser for CanonicalPathValueParser {
     type Value = std::path::PathBuf;
 
-    fn parse_ref(&self, cmd: &clap::Command, arg: Option<&clap::Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
         let value: &std::path::Path = value.as_ref();
         value.canonicalize().map_err(|err| {
             let arg_text = arg.map_or(String::new(), |arg| {
                 let literal = cmd.get_styles().get_literal();
-                format!("(for '{}{arg}{}')", literal.render(), literal.render_reset())
+                format!(
+                    "(for '{}{arg}{}')",
+                    literal.render(),
+                    literal.render_reset()
+                )
             });
             let err_style = cmd.get_styles().get_error();
-            clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to canonicalize path {} ({arg_text}) {value:?}: {}{err}{}\n", value.display(), err_style.render(), err_style.render_reset()))
-                .with_cmd(cmd)
+            clap::Error::raw(
+                clap::error::ErrorKind::Io,
+                format!(
+                    "failed to canonicalize path {} ({arg_text}) {value:?}: {}{err}{}\n",
+                    value.display(),
+                    err_style.render(),
+                    err_style.render_reset()
+                ),
+            )
+            .with_cmd(cmd)
         })
     }
 }
 
 fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
-    matches.get_many::<std::path::PathBuf>("dirs")
-        .map(|paths| paths.map(PathBuf::as_path).map(LinkedPath::from_path_buf).collect::<Vec<_>>())
+    matches
+        .get_many::<std::path::PathBuf>("dirs")
+        .map(|paths| {
+            paths
+                .map(PathBuf::as_path)
+                .map(LinkedPath::from_path_buf)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or(Vec::new())
 }
 
 fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder + Send>> {
-    let mut order = matches.get_many::<String>("setorder").map_or(Vec::new(), |options| {
-        let variants = get_set_order_options();
-        options.map(|sname| variants.iter().find(|(name, _, _)| name == sname).unwrap().2.dyn_clone()).collect::<Vec<_>>()
-    });
+    let mut order = matches
+        .get_many::<String>("setorder")
+        .map_or(Vec::new(), |options| {
+            let variants = get_set_order_options();
+            options
+                .map(|sname| {
+                    variants
+                        .iter()
+                        .find(|(name, _, _)| name == sname)
+                        .unwrap()
+                        .2
+                        .dyn_clone()
+                })
+                .collect::<Vec<_>>()
+        });
     if order.is_empty() {
         order.push(Box::new(ModTimeSetOrder::new(false)));
     }
@@ -290,7 +377,11 @@ fn parse_ignore_log_targets(matches: &clap::ArgMatches) -> Vec<String> {
             .map(|it| it.to_ascii_lowercase())
             .filter(|s| s != "~")
             .collect::<HashSet<String>>();
-        all_targets.into_iter().filter(|s| !targets.contains(*s)).map(std::borrow::ToOwned::to_owned).collect::<Vec<_>>()
+        all_targets
+            .into_iter()
+            .filter(|s| !targets.contains(*s))
+            .map(std::borrow::ToOwned::to_owned)
+            .collect::<Vec<_>>()
     } else if let Some(target_change) = matches.get_many::<String>("logtargets") {
         let mut default_ignore = HashSet::new();
         let changes = target_change
@@ -327,7 +418,7 @@ fn parse_path_blacklist(matches: &clap::ArgMatches) -> Option<Box<dyn FileNameFi
 }
 
 fn parse_file_filter(matches: &clap::ArgMatches) -> FileFilter {
-    fn gather_exts<'a>(exts: impl Iterator<Item=&'a OsString>) -> (HashSet<OsString>, bool) {
+    fn gather_exts<'a>(exts: impl Iterator<Item = &'a OsString>) -> (HashSet<OsString>, bool) {
         let mut exts_col = HashSet::with_capacity(exts.size_hint().0);
         let mut no_ext = false;
         let curly = OsString::from("~");
@@ -350,7 +441,8 @@ fn parse_file_filter(matches: &clap::ArgMatches) -> FileFilter {
         metadata_filter.push(Box::new(MinSizeFileFilter::new(filter.0.saturating_sub(1))));
     }
 
-    let additional = get_file_name_filters().into_iter()
+    let additional = get_file_name_filters()
+        .into_iter()
         .filter(|arg| matches.get_flag(arg.name))
         .map(|arg| arg.action);
 
@@ -373,7 +465,10 @@ fn parse_file_filter(matches: &clap::ArgMatches) -> FileFilter {
     if let Some(filter) = parse_path_blacklist(matches) {
         filename_filter.push(filter);
     }
-    FileFilter(filename_filter.into_boxed_slice(), metadata_filter.into_boxed_slice())
+    FileFilter(
+        filename_filter.into_boxed_slice(),
+        metadata_filter.into_boxed_slice(),
+    )
 }
 
 fn parse_input_source(matches: &clap::ArgMatches) -> Vec<Box<dyn InputSource>> {
@@ -388,7 +483,8 @@ fn parse_input_source(matches: &clap::ArgMatches) -> Vec<Box<dyn InputSource>> {
     let file_filter = parse_file_filter(matches);
 
     if !dirs.is_empty() {
-        let source = DiscoveringInputSource::new(recurse, follow_symlinks, dirs, file_filter.clone());
+        let source =
+            DiscoveringInputSource::new(recurse, follow_symlinks, dirs, file_filter.clone());
         input_source.push(Box::new(source));
     }
 
@@ -409,52 +505,120 @@ fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
         ("ralphabetic", Box::new(NameAlphabeticSetOrder::new(true)), "Order the files alphabetically descending(risks and side effects of 'alphabetic' apply)"),
         ("as_is", Box::new(NoopSetOrder::new()), "Do not order the files; the order is thus non-deterministic and not reproducible"),
     ];
-    let default_order_options = default_order_options.into_iter()
+    let default_order_options = default_order_options
+        .into_iter()
         .map(|(name, action, help)| (name, String::from(help), action));
 
-    let os_options = crate::os::get_set_order_options().into_iter()
-        .map(|SetOrderOption { name, help, implementation }| (name, help, implementation));
+    let os_options = crate::os::get_set_order_options().into_iter().map(
+        |SetOrderOption {
+             name,
+             help,
+             implementation,
+         }| (name, help, implementation),
+    );
 
     default_order_options.chain(os_options).collect::<Vec<_>>()
 }
 
 fn get_file_consume_action_args() -> Vec<SimpleArgDeclaration<Box<dyn FileConsumeAction + Send>>> {
     let default: Vec<(_, _, _, _, _, Box<dyn FileConsumeAction + Send>)> = vec![
-        ("isdel", Some('d'), "delete", String::from("Delete duplicated files"), false, Box::<DeleteFileAction>::default()),
-        ("rehl", Some('l'), "rehardlink", String::from("Replace duplicated files with a hard link"), false, Box::<ReplaceWithHardLinkFileAction>::default()),
+        (
+            "isdel",
+            Some('d'),
+            "delete",
+            String::from("Delete duplicated files"),
+            false,
+            Box::<DeleteFileAction>::default(),
+        ),
+        (
+            "rehl",
+            Some('l'),
+            "rehardlink",
+            String::from("Replace duplicated files with a hard link"),
+            false,
+            Box::<ReplaceWithHardLinkFileAction>::default(),
+        ),
     ];
-    let os_specific = crate::os::get_file_consumer_simple()
+    let os_specific = crate::os::get_file_consumer_simple().into_iter().map(
+        |SimpleFileConsumeActionArg {
+             name,
+             short,
+             long,
+             help,
+             default,
+             action,
+         }| (name, short, long, help, default, action),
+    );
+    default
         .into_iter()
-        .map(|SimpleFileConsumeActionArg { name, short, long, help, default, action }| (name, short, long, help, default, action));
-    default.into_iter().chain(os_specific)
-        .map(|(name, short, long, help, is_default, action)| SimpleArgDeclaration {
-            name, short, long, help, is_default, action,
-        })
+        .chain(os_specific)
+        .map(
+            |(name, short, long, help, is_default, action)| SimpleArgDeclaration {
+                name,
+                short,
+                long,
+                help,
+                is_default,
+                action,
+            },
+        )
         .collect::<Vec<_>>()
 }
 
 fn get_file_equals_args() -> Vec<SimpleArgDeclaration<Box<dyn FileEqualsChecker + Send>>> {
-    let default: Vec<(_, _, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
-        ("contenteq", Some('c'), "nocontenteq", String::from("do not compare files byte-by-byte(only by hash)"), true, Box::new(FileContentEquals::new()))
-    ];
-    let os_specific = crate::os::get_file_equals_simple()
+    let default: Vec<(_, _, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![(
+        "contenteq",
+        Some('c'),
+        "nocontenteq",
+        String::from("do not compare files byte-by-byte(only by hash)"),
+        true,
+        Box::new(FileContentEquals::new()),
+    )];
+    let os_specific = crate::os::get_file_equals_simple().into_iter().map(
+        |SimpleFileEqualCheckerArg {
+             name,
+             short,
+             long,
+             help,
+             default,
+             action,
+         }| (name, short, long, help, default, action),
+    );
+    default
         .into_iter()
-        .map(|SimpleFileEqualCheckerArg { name, short, long, help, default, action }| (name, short, long, help, default, action));
-    default.into_iter().chain(os_specific)
-        .map(|(name, short, long, help, is_default, action)| SimpleArgDeclaration {
-            name, short, long, help, is_default, action,
-        })
+        .chain(os_specific)
+        .map(
+            |(name, short, long, help, is_default, action)| SimpleArgDeclaration {
+                name,
+                short,
+                long,
+                help,
+                is_default,
+                action,
+            },
+        )
         .collect::<Vec<_>>()
-
 }
 
 fn get_file_name_filters() -> Vec<SimpleArgDeclaration<Box<dyn FileNameFilter + Send>>> {
     let mut default = Vec::new();
-    let os_specific = crate::os::get_file_name_filters()
-        .into_iter()
-        .map(|FileNameFilterArg { name, short, long, help, default, action }| SimpleArgDeclaration {
-            name, short, long, help, is_default: default, action,
-        });
+    let os_specific = crate::os::get_file_name_filters().into_iter().map(
+        |FileNameFilterArg {
+             name,
+             short,
+             long,
+             help,
+             default,
+             action,
+         }| SimpleArgDeclaration {
+            name,
+            short,
+            long,
+            help,
+            is_default: default,
+            action,
+        },
+    );
     default.extend(os_specific);
     default
 }
@@ -465,21 +629,22 @@ fn set_order_parser() -> clap::builder::ValueParser {
         .map(|(name, help, _)| PossibleValue::new(name).help(help))
         .collect::<Vec<_>>();
 
-    PossibleValuesParser::new(values)
-        .into()
+    PossibleValuesParser::new(values).into()
 }
 
 pub fn parse() -> ExecutionPlan {
-    let matches = assemble_command_info()
-        .get_matches();
+    let matches = assemble_command_info().get_matches();
     //let x = matches.get_many::<usize>("oi").unwrap();
 
     let num_threads = match matches.get_one::<u32>("numthreads") {
-        Some(0) => {
-            u32::try_from(std::thread::available_parallelism().map_or(1, NonZeroUsize::get).saturating_mul(2)).unwrap_or(1)
-        }
+        Some(0) => u32::try_from(
+            std::thread::available_parallelism()
+                .map_or(1, NonZeroUsize::get)
+                .saturating_mul(2),
+        )
+        .unwrap_or(1),
         Some(num) => *num,
-        None => 1
+        None => 1,
     };
 
     let set_ordering = parse_set_order(&matches);
@@ -496,14 +661,18 @@ pub fn parse() -> ExecutionPlan {
         .collect::<Vec<_>>();
 
     let file_set_consumer: Box<dyn FileSetConsumer> = if matches.get_flag("uncond") {
-        Box::new(UnconditionalAction::new(file_action.expect("file action should be present because of command config")))
+        Box::new(UnconditionalAction::new(file_action.expect(
+            "file action should be present because of command config",
+        )))
     } else if matches.get_flag("iact") {
-        Box::new(InteractiveEachChoice::for_console(file_action.expect("file action should be present because of command config")))
+        Box::new(InteractiveEachChoice::for_console(file_action.expect(
+            "file action should be present because of command config",
+        )))
     } else if let Some(kind) = matches.get_one::<String>("machine_readable") {
         match kind.as_str() {
             "pairwise" => Box::new(MachineReadableEach::for_console()),
             "setwise" => Box::new(MachineReadableSet::for_console()),
-            _ => panic!("invalid maschine-reable-out config {kind}")
+            _ => panic!("invalid maschine-reable-out config {kind}"),
         }
     } else {
         Box::new(DryRun::for_console())

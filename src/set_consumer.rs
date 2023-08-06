@@ -1,8 +1,10 @@
-use std::path::{PathBuf};
-use crate::{handle_file_op, HashedFile, in_err_map, out_err_map, Recoverable, report_file_missing};
-use crate::error_handling::{AlreadyReportedError};
+use crate::error_handling::AlreadyReportedError;
 use crate::file_action::FileConsumeAction;
-use crate::util::{ChoiceInputReader, path_contains_comma};
+use crate::util::{path_contains_comma, ChoiceInputReader};
+use crate::{
+    handle_file_op, in_err_map, out_err_map, report_file_missing, HashedFile, Recoverable,
+};
+use std::path::PathBuf;
 
 pub trait FileSetConsumer {
     /// first element of set is the 'original',
@@ -27,15 +29,22 @@ pub struct InteractiveEachChoice<R, W> {
     write: W,
 }
 
-
 /// simply print all files that would be affected by an action
 pub struct DryRun<W> {
     path_buf: PathBuf,
     write: W,
 }
 
-pub struct MachineReadableEach<W> { written_before: bool, writer: W, path_bufs: (PathBuf, PathBuf) }
-pub struct MachineReadableSet<W> { written_before: bool, writer: W, path_bufs: (PathBuf, PathBuf) }
+pub struct MachineReadableEach<W> {
+    written_before: bool,
+    writer: W,
+    path_bufs: (PathBuf, PathBuf),
+}
+pub struct MachineReadableSet<W> {
+    written_before: bool,
+    writer: W,
+    path_bufs: (PathBuf, PathBuf),
+}
 
 impl Default for DryRun<std::io::Stdout> {
     fn default() -> Self {
@@ -47,11 +56,17 @@ impl Default for DryRun<std::io::Stdout> {
 }
 
 impl<W> DryRun<W> {
-    pub fn new() -> Self where Self: Default {
+    pub fn new() -> Self
+    where
+        Self: Default,
+    {
         Self::default()
     }
     pub fn new_with(write: W) -> Self {
-        Self { path_buf: PathBuf::new(), write }
+        Self {
+            path_buf: PathBuf::new(),
+            write,
+        }
     }
 }
 
@@ -63,15 +78,23 @@ impl DryRun<std::io::Stdout> {
 
 macro_rules! warn_path_contains_comma {
     ($path: expr) => {
-        log::warn!(target: crate::error_handling::FORMAT_ERR_TARGET, "path {} contains a ',' and cannot be written in machine readable format", $path.display());
+        log::warn!(
+            target: crate::error_handling::FORMAT_ERR_TARGET,
+            "path {} contains a ',' and cannot be written in machine readable format",
+            $path.display()
+        );
     };
 }
 
 impl<W: std::io::Write> FileSetConsumer for DryRun<W> {
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
-
         set[0].file_path.write_full_to_buf(&mut self.path_buf);
-        write!(self.write, "keeping {}, dry-deleting ", self.path_buf.display()).map_err(out_err_map!())?;
+        write!(
+            self.write,
+            "keeping {}, dry-deleting ",
+            self.path_buf.display()
+        )
+        .map_err(out_err_map!())?;
         let mut write_sep = false;
         for file in &set[1..] {
             if write_sep {
@@ -102,7 +125,7 @@ impl FileSetConsumer for UnconditionalAction {
             let Some(file) = set.get(0) else { return Ok(()) };
             file.file_path.write_full_to_buf(&mut self.original_buf);
             if self.original_buf.exists() {
-                break &self.original_buf
+                break &self.original_buf;
             } else {
                 report_file_missing!(&self.original_buf);
                 set.remove(0);
@@ -112,11 +135,17 @@ impl FileSetConsumer for UnconditionalAction {
             file.file_path.write_full_to_buf(&mut self.running_buf);
             if !self.running_buf.exists() {
                 report_file_missing!(&self.running_buf);
-                continue
+                continue;
             }
-            if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(original_buf)) {
-                log::error!(target: crate::error_handling::FILE_SET_ERR_TARGET,"aborting '{}' due to previous error", self.action.short_name());
-                return Err(AlreadyReportedError)
+            if let Err(Recoverable::Fatal(AlreadyReportedError {})) =
+                self.action.consume(&self.running_buf, Some(original_buf))
+            {
+                log::error!(
+                    target: crate::error_handling::FILE_SET_ERR_TARGET,
+                    "aborting '{}' due to previous error",
+                    self.action.short_name()
+                );
+                return Err(AlreadyReportedError);
             };
         }
         Ok(())
@@ -148,7 +177,7 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
             let Some(file) = set.get(0) else { return Ok(()) };
             file.file_path.write_full_to_buf(&mut self.original_buf);
             if self.original_buf.exists() {
-               break &self.original_buf;
+                break &self.original_buf;
             } else {
                 report_file_missing!(&self.original_buf);
                 set.remove(0);
@@ -160,14 +189,25 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 report_file_missing!(&self.running_buf);
                 continue;
             }
-            writeln!(self.write, "{} {}?", self.action.short_name().as_ref(), self.running_buf.display()).map_err(out_err_map!())?;
+            writeln!(
+                self.write,
+                "{} {}?",
+                self.action.short_name().as_ref(),
+                self.running_buf.display()
+            )
+            .map_err(out_err_map!())?;
             let execute_action = loop {
                 self.write.flush().map_err(out_err_map!())?;
                 self.choice_buf.clear();
-                self.read.read_remaining(&mut self.choice_buf).map_err(in_err_map!())?;
+                self.read
+                    .read_remaining(&mut self.choice_buf)
+                    .map_err(in_err_map!())?;
                 if self.choice_buf.is_empty() {
-                    log::error!(target: crate::error_handling::INTERACTION_ERR_TARGET, "cannot accept input in interactive mode since the input is closed");
-                    return Err(AlreadyReportedError)
+                    log::error!(
+                        target: crate::error_handling::INTERACTION_ERR_TARGET,
+                        "cannot accept input in interactive mode since the input is closed"
+                    );
+                    return Err(AlreadyReportedError);
                 }
                 let choice = self.choice_buf.trim();
 
@@ -176,14 +216,24 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
                 } else if choice.eq_ignore_ascii_case("n") | choice.eq_ignore_ascii_case("no") {
                     break false;
                 } else {
-                    writeln!(self.write, "unrecognised answer; only y(es) and n(o) are accepted").map_err(out_err_map!())?;
+                    writeln!(
+                        self.write,
+                        "unrecognised answer; only y(es) and n(o) are accepted"
+                    )
+                    .map_err(out_err_map!())?;
                 }
             };
 
             if execute_action {
-                if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(original_buf)) {
-                    log::error!(target: crate::error_handling::FILE_SET_ERR_TARGET, "aborting '{}' due to previous error", self.action.short_name());
-                    return Err(AlreadyReportedError)
+                if let Err(Recoverable::Fatal(AlreadyReportedError {})) =
+                    self.action.consume(&self.running_buf, Some(original_buf))
+                {
+                    log::error!(
+                        target: crate::error_handling::FILE_SET_ERR_TARGET,
+                        "aborting '{}' due to previous error",
+                        self.action.short_name()
+                    );
+                    return Err(AlreadyReportedError);
                 };
             }
         }
@@ -191,9 +241,13 @@ impl<R: ChoiceInputReader, W: std::io::Write> FileSetConsumer for InteractiveEac
     }
 }
 
-impl <W: std::io::Write> MachineReadableEach<W> {
+impl<W: std::io::Write> MachineReadableEach<W> {
     pub fn new(writer: W) -> Self {
-        Self { written_before: false, writer,path_bufs: (PathBuf::new(), PathBuf::new()) }
+        Self {
+            written_before: false,
+            writer,
+            path_bufs: (PathBuf::new(), PathBuf::new()),
+        }
     }
 }
 
@@ -203,7 +257,7 @@ impl MachineReadableEach<std::io::Stdout> {
     }
 }
 
-impl <W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
+impl<W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
     fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         let (orig_path, tmp_path) = &mut self.path_bufs;
         let Some(orig_path) = find_nocomma_original(&mut set, orig_path) else { return Ok(()) };
@@ -218,7 +272,13 @@ impl <W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
             if self.written_before {
                 writeln!(self.writer).map_err(out_err_map!())?;
             }
-            write!(self.writer, "{},{}", orig_path.display(), tmp_path.display()).map_err(out_err_map!())?;
+            write!(
+                self.writer,
+                "{},{}",
+                orig_path.display(),
+                tmp_path.display()
+            )
+            .map_err(out_err_map!())?;
             self.written_before = true;
         }
 
@@ -226,9 +286,13 @@ impl <W: std::io::Write> FileSetConsumer for MachineReadableEach<W> {
     }
 }
 
-impl <W: std::io::Write> MachineReadableSet<W> {
+impl<W: std::io::Write> MachineReadableSet<W> {
     pub fn new(writer: W) -> Self {
-        Self { written_before: false, writer, path_bufs: (PathBuf::new(), PathBuf::new()) }
+        Self {
+            written_before: false,
+            writer,
+            path_bufs: (PathBuf::new(), PathBuf::new()),
+        }
     }
 }
 
@@ -238,7 +302,7 @@ impl MachineReadableSet<std::io::Stdout> {
     }
 }
 
-impl <W: std::io::Write> FileSetConsumer for MachineReadableSet<W> {
+impl<W: std::io::Write> FileSetConsumer for MachineReadableSet<W> {
     fn consume_set(&mut self, mut set: Vec<HashedFile>) -> Result<(), AlreadyReportedError> {
         let (orig_path, tmp_path) = &mut self.path_bufs;
         let mut first = true;
@@ -255,7 +319,13 @@ impl <W: std::io::Write> FileSetConsumer for MachineReadableSet<W> {
             }
             let empty_path = PathBuf::new();
             let prev_path = if first { &orig_path } else { &empty_path };
-            write!(self.writer, "{},{}", prev_path.display(), tmp_path.display()).map_err(out_err_map!())?;
+            write!(
+                self.writer,
+                "{},{}",
+                prev_path.display(),
+                tmp_path.display()
+            )
+            .map_err(out_err_map!())?;
             first = false;
             self.written_before = true;
         }
@@ -267,14 +337,17 @@ fn find_nocomma_original(set: &mut Vec<HashedFile>, orig_path: &mut PathBuf) -> 
     let buf = loop {
         let Some(first) = set.get(0) else { return None };
         first.file_path.write_full_to_buf(orig_path);
-        let orig_path = handle_file_op!(orig_path.canonicalize(), orig_path, {set.remove(0); continue});
+        let orig_path = handle_file_op!(orig_path.canonicalize(), orig_path, {
+            set.remove(0);
+            continue;
+        });
         if path_contains_comma(&orig_path) {
             warn_path_contains_comma!(&orig_path);
             set.remove(0);
-            continue
+            continue;
         }
 
-        break orig_path
+        break orig_path;
     };
     Some(buf)
 }
