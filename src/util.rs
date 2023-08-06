@@ -35,6 +35,8 @@ impl <'a> ChoiceInputReader for &'a [u8] {
 }
 
 #[derive(Clone, Debug, Eq, Hash)]
+// the partial equals just enforces an optimised order
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct LinkedPath(Option<Arc<LinkedPath>>, OsString);
 impl LinkedPath {
     pub fn new_child(parent: &Arc<LinkedPath>, segment: OsString) -> Self {

@@ -40,7 +40,7 @@ pub struct ReplaceWithHardLinkFileAction {
 /// report a successful file action
 #[macro_export]
 macro_rules! report_file_action {
-    ($text: literal, $($r: expr),*) => {log::info!(target: crate::error_handling::ACTION_SUCCESS_TARGET, $text, $($r),*)};
+    ($text: literal, $($r: expr),*) => {log::info!(target: $crate::error_handling::ACTION_SUCCESS_TARGET, $text, $($r),*)};
 }
 
 impl FileConsumeAction for DebugFileAction {

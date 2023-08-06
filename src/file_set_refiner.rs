@@ -1,6 +1,5 @@
 use std::io::Read;
-use std::ops::DerefMut;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use crate::error_handling::AlreadyReportedError;
 use crate::{dyn_clone_impl, handle_file_op};
 
@@ -12,14 +11,14 @@ impl FileSetRefiners {
         Self(checkers)
     }
 
-    pub fn hash_components(&mut self, hasher: &mut dyn std::hash::Hasher, file: &PathBuf) -> Result<(), AlreadyReportedError> {
+    pub fn hash_components(&mut self, hasher: &mut dyn std::hash::Hasher, file: &Path) -> Result<(), AlreadyReportedError> {
         for refiner in self.0.iter_mut() {
             refiner.hash_component(file, hasher)?;
         }
         Ok(())
     }
 
-    pub fn check_equal(&mut self, a: &PathBuf, b: &PathBuf) -> Result<bool, CheckEqualsError> {
+    pub fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsErrorOn> {
         for refiner in self.0.iter_mut() {
             refiner.check_equal(a, b)?;
         }
@@ -35,43 +34,45 @@ impl Clone for FileSetRefiners {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum CheckEqualsError {
-    FirstFaulty, SecondFaulty, BothFaulty
+pub enum CheckEqualsErrorOn {
+    First,
+    Second,
+    Both
 }
 
-impl CheckEqualsError {
-    pub fn is_faulty(&self) -> (bool, bool) {
+impl CheckEqualsErrorOn {
+    pub fn is_faulty(self) -> (bool, bool) {
         match self {
-            CheckEqualsError::FirstFaulty => (true, false),
-            CheckEqualsError::SecondFaulty => (false, true),
-            CheckEqualsError::BothFaulty => (true, true)
+            CheckEqualsErrorOn::First => (true, false),
+            CheckEqualsErrorOn::Second => (false, true),
+            CheckEqualsErrorOn::Both => (true, true)
         }
     }
     pub fn first_err() -> Self {
-        Self::FirstFaulty
+        Self::First
     }
 
     pub fn second_err() -> Self {
-        Self::SecondFaulty
+        Self::Second
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
-pub enum FileWork {
+pub enum FileWorkload {
     /// cpu bound work
-    SimpleWork = 0,
+    Simple = 0,
     /// compare based on some file property
-    FileMetadataWork = 1,
+    FileMetadata = 1,
     /// compare based on the file content itself
-    FileContentWork = 2
+    FileContent = 2
 }
 
 /// checks whether to files are equal
 pub trait FileEqualsChecker: FileEqualsCheckDynClone {
-    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsError>;
+    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsErrorOn>;
     /// hash the property were checking for(like the permissions), may be a noop if property cannot be hashed.
     fn hash_component(&mut self, f: &Path, hasher:  &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>;
-    fn work_severity(&self) -> FileWork;
+    fn work_severity(&self) -> FileWorkload;
 }
 
 dyn_clone_impl!(FileEqualsCheckDynClone, FileEqualsChecker);
@@ -92,26 +93,26 @@ impl FileContentEquals {
 }
 
 impl FileEqualsChecker for FileContentEquals{
-    fn check_equal(&mut self, a_path: &Path, b_path: &Path) -> Result<bool, CheckEqualsError>{
-        let (buf_a, buf_b) = self.buf.deref_mut();
+    fn check_equal(&mut self, a_path: &Path, b_path: &Path) -> Result<bool, CheckEqualsErrorOn>{
+        let (buf_a, buf_b) = &mut *self.buf;
 
-        let mut a = handle_file_op!(std::fs::File::open(a_path), a_path, return Err(CheckEqualsError::FirstFaulty));
-        let mut b = handle_file_op!(std::fs::File::open(b_path), b_path, return Err(CheckEqualsError::SecondFaulty));
+        let mut a = handle_file_op!(std::fs::File::open(a_path), a_path, return Err(CheckEqualsErrorOn::First));
+        let mut b = handle_file_op!(std::fs::File::open(b_path), b_path, return Err(CheckEqualsErrorOn::Second));
 
-        let metadata_a = handle_file_op!(a.metadata(), a_path, return Err(CheckEqualsError::FirstFaulty));
-        let metadata_b= handle_file_op!(b.metadata(), b_path, return Err(CheckEqualsError::SecondFaulty));
+        let metadata_a = handle_file_op!(a.metadata(), a_path, return Err(CheckEqualsErrorOn::First));
+        let metadata_b= handle_file_op!(b.metadata(), b_path, return Err(CheckEqualsErrorOn::Second));
 
         if metadata_a.len() != metadata_b.len() {
             return Ok(false)
         }
 
         loop {
-            let l = handle_file_op!(a.read(buf_a), a_path, return Err(CheckEqualsError::FirstFaulty));
+            let l = handle_file_op!(a.read(buf_a), a_path, return Err(CheckEqualsErrorOn::First));
             if l == 0 {
                 return Ok(true);
             }
-            handle_file_op!(b.read(buf_b), b_path, return Err(CheckEqualsError::SecondFaulty));
-            if buf_a[..l] != buf_b[..l] {
+            let l2 = handle_file_op!(b.read(buf_b), b_path, return Err(CheckEqualsErrorOn::Second));
+            if (l != l2) || (buf_a[..l] != buf_b[..l]) {
                 return Ok(false);
             }
         }
@@ -119,7 +120,7 @@ impl FileEqualsChecker for FileContentEquals{
 
     fn hash_component(&mut self, _a: &Path, _hasher: &mut dyn std::hash::Hasher) -> Result<(), AlreadyReportedError>{ Ok(()) }
 
-    fn work_severity(&self) -> FileWork {
-        FileWork::FileContentWork
+    fn work_severity(&self) -> FileWorkload {
+        FileWorkload::FileContent
     }
 }

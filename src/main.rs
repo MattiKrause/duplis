@@ -1,4 +1,5 @@
 #![warn(clippy::pedantic)]
+#![allow(clippy::redundant_else, clippy::module_name_repetitions)]
 
 extern crate core;
 
@@ -61,12 +62,12 @@ pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
     // the data required to run the program
-    let ExecutionPlan { file_equals, mut order_set, action: mut file_set_action, num_threads, ignore_log_set, input_sources, dedup_files } = parse_cli::parse().unwrap();
+    let ExecutionPlan { file_equals, mut order_set, action: mut file_set_action, num_threads, ignore_log_set, input_sources, dedup_files } = parse_cli::parse();
 
     logger::DuplisLogger::init(ignore_log_set, LevelFilter::Trace, Box::new(stderr())).unwrap();
 
     let set_refiners = FileSetRefiners::new(file_equals.into_boxed_slice());
-    order_set.push(Box::new(SymlinkSetOrder::default()));
+    order_set.push(Box::<SymlinkSetOrder>::default());
     // if don't thread we want essentially a list, if we thread, there is no harm in keeping then backlog in check
     let (files_send, files_rev): (flume::Sender<LinkedPath>, _) = if num_threads.get() > 1 { flume::bounded(128) } else { flume::unbounded() };
     let target: DashMap<u128, Vec<(u128, Vec<HashedFile>)>> = DashMap::new();
@@ -100,7 +101,7 @@ fn main() {
             place_files_to_set(set_refiners, files_rev, &target);
         }
     });
-    for mut set in target.into_iter().map(|(_, v)| v).flat_map(|sets| sets.into_iter()) {
+    for mut set in target.into_iter().map(|(_, v)| v).flat_map(std::iter::IntoIterator::into_iter) {
         if set.1.len() <= 1 {
             continue;
         }
@@ -113,7 +114,7 @@ fn main() {
             continue;
         }
 
-        if let Err(_) = file_set_action.consume_set(set.1) {
+        if file_set_action.consume_set(set.1).is_err() {
             break;
         };
     }
@@ -123,18 +124,15 @@ fn place_files_to_set(mut set_refiners: FileSetRefiners, files: flume::Receiver<
     let mut path_buf = PathBuf::new();
     let mut path_buf_tmp = PathBuf::new();
 
-    for file_path in files.into_iter() {
+    for file_path in files {
         file_path.write_full_to_buf(&mut path_buf);
-        let result = place_into_file_set(file_path, &path_buf, &mut path_buf_tmp, &mut set_refiners, |hash| target.entry(hash).or_insert(Vec::new()));
-        if let Err(_) = result {
-            continue;
-        }
+        let _ = place_into_file_set(file_path, &path_buf, &mut path_buf_tmp, &mut set_refiners, |hash| target.entry(hash).or_insert(Vec::new()));
     }
 }
 
-fn place_into_file_set<'s, R, F>(
+fn place_into_file_set<R, F>(
     file_path: LinkedPath,
-    file: &PathBuf,
+    file: &Path,
     tmp_buf: &mut PathBuf,
     refiners: &mut FileSetRefiners,
     find_set: F,
@@ -153,10 +151,10 @@ fn place_into_file_set<'s, R, F>(
         }
     };
     let file_hash = hash.digest128();
-    refiners.hash_components(&mut hash, &file)?;
+    refiners.hash_components(&mut hash, file)?;
 
     let mut course_set = find_set(hash.digest128());
-    let course_set = course_set.deref_mut();
+    let course_set = &mut *course_set;
 
     // we have created an new course set, thus there is nothing to compare this file to
     if course_set.is_empty() {
@@ -174,7 +172,7 @@ fn place_into_file_set<'s, R, F>(
     Ok(())
 }
 
-fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &PathBuf, tmp_buf: &mut PathBuf, refiners: &mut FileSetRefiners) -> Result<bool, AlreadyReportedError> {
+fn fits_into_file_set(file_set: &mut Vec<HashedFile>, file: &Path, tmp_buf: &mut PathBuf, refiners: &mut FileSetRefiners) -> Result<bool, AlreadyReportedError> {
     loop {
         let Some(HashedFile { file_path: check_against, .. }) = file_set.first() else { return Ok(false); };
         check_against.write_full_to_buf(tmp_buf);

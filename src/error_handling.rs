@@ -22,7 +22,7 @@ declare_log_targets! {
 #[macro_export]
 macro_rules! report_file_missing {
     ($path: expr) => {
-        log::trace!(target: crate::error_handling::FILE_ERR_TARGET, "file {} disappeared while being processed", $path.display())
+        log::trace!(target: $crate::error_handling::FILE_ERR_TARGET, "file {} disappeared while being processed", $path.display())
     };
 }
 
@@ -30,9 +30,9 @@ macro_rules! report_file_missing {
 macro_rules! handle_file_error {
     ($file_path: expr, $err: expr) => {
         match $err.kind() {
-            std::io::ErrorKind::NotFound => crate::report_file_missing!(&$file_path),
-            std::io::ErrorKind::PermissionDenied => log::info!(target: crate::error_handling::FILE_ERR_TARGET, "cannot access file {}(permission denied)", $file_path.display()),
-            _ => log::warn!(target: crate::error_handling::FILE_ERR_TARGET, "unexpected error while accessing file {}: {}", $file_path.display(), $err)
+            std::io::ErrorKind::NotFound => $crate::report_file_missing!(&$file_path),
+            std::io::ErrorKind::PermissionDenied => log::info!(target: $crate::error_handling::FILE_ERR_TARGET, "cannot access file {}(permission denied)", $file_path.display()),
+            _ => log::warn!(target: $crate::error_handling::FILE_ERR_TARGET, "unexpected error while accessing file {}: {}", $file_path.display(), $err)
         };
     };
 }
@@ -43,7 +43,7 @@ macro_rules! handle_file_op {
         match $result {
             Ok(result) => result,
             Err(err) => {
-                crate::handle_file_error!($file_path, err);
+                $crate::handle_file_error!($file_path, err);
                 $handle_action
             }
         }
@@ -52,7 +52,7 @@ macro_rules! handle_file_op {
 
 #[macro_export]
 macro_rules! handle_file_modified {
-    ($file_path: expr) => { log::warn!(target: crate::error_handling::FILE_ERR_TARGET, "file {} was modified while still being processed; The file will not be processed further", $file_path.display()) };
+    ($file_path: expr) => { log::warn!(target: $crate::error_handling::FILE_ERR_TARGET, "file {} was modified while still being processed; The file will not be processed further", $file_path.display()) };
 }
 
 
@@ -60,7 +60,7 @@ macro_rules! handle_file_modified {
 #[macro_export]
 macro_rules! out_err_map {
     () => { |err| {
-        log::error!(target: crate::error_handling::INTERACTION_ERR_TARGET, "cannot write out in interactive mode: {err}; aborting");
+        log::error!(target: $crate::error_handling::INTERACTION_ERR_TARGET, "cannot write out in interactive mode: {err}; aborting");
         AlreadyReportedError
     }};
 }
@@ -69,7 +69,7 @@ macro_rules! out_err_map {
 #[macro_export]
 macro_rules! in_err_map {
     () => { |err| {
-        log::error!(target: crate::error_handling::INTERACTION_ERR_TARGET, "cannot accept input in interactive mode: {err}; aborting");
+        log::error!(target: $crate::error_handling::INTERACTION_ERR_TARGET, "cannot accept input in interactive mode: {err}; aborting");
         AlreadyReportedError
     }};
 }

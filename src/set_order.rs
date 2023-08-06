@@ -72,7 +72,7 @@ impl <F: Ord> MetadataSetOrder<F> {
             let metadata = handle_file_op!(self.path_buf.symlink_metadata(), self.path_buf, continue);
 
             let key = key_extract(metadata)?;
-            self.file_buf.push((key, file_data))
+            self.file_buf.push((key, file_data));
         }
         // sort stable in case there are multiple sorters
         self.file_buf.sort_by(|(key1, _), (key2, _)| {

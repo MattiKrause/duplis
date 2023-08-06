@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::Metadata;
-use std::ops::DerefMut;
 use std::path::Path;
 use std::sync::Arc;
 use crate::{dyn_clone_impl, handle_file_op};
@@ -11,7 +10,7 @@ pub struct FileFilter(pub Box<[Box<dyn FileNameFilter + Send>]>, pub Box<[Box<dy
 
 impl FileFilter {
     fn filter_name(&mut self, name: &LinkedPath, name_path: &Path) -> bool {
-        for name_filter in self.0.deref_mut() {
+        for name_filter in &mut *self.0 {
             let result = name_filter.filter_file_name(name, name_path).unwrap_or(false);
             if !result {
                 return false;
@@ -21,8 +20,8 @@ impl FileFilter {
     }
 
     fn filter_metadata(&mut self, name: &LinkedPath, name_path: &Path, metadata: &Metadata) -> bool {
-        for metadata_filter in self.1.deref_mut() {
-            let result = metadata_filter.filter_file_metadata(name, name_path, &metadata).unwrap_or(false);
+        for metadata_filter in &mut *self.1 {
+            let result = metadata_filter.filter_file_metadata(name, name_path, metadata).unwrap_or(false);
             if !result {
                 return false;
             }
@@ -51,10 +50,10 @@ impl FileFilter {
         self.filter_metadata(name, name_path, metadata)
     }
 
-    pub fn keep_file_dir_entry(&mut self, name: &LinkedPath, name_path: &Path, entry: std::fs::DirEntry) -> bool {
+    pub fn keep_file_dir_entry(&mut self, name: &LinkedPath, name_path: &Path, entry: &std::fs::DirEntry) -> bool {
         if cfg!(windows) {
             let Ok(metadata) = entry.metadata() else { return false; };
-            self.keep_file_md(&name, &name_path, &metadata)
+            self.keep_file_md(name, name_path, &metadata)
         } else {
             self.keep_file(name, name_path)
         }
@@ -161,7 +160,7 @@ impl PathFilter {
                     } else {
                         current = current.0.entry(seg.to_os_string()).or_insert(Some(PathFilterTree(HashMap::new())))
                             .as_mut()
-                            .unwrap()
+                            .unwrap();
                     }
                 }
             }

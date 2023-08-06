@@ -64,7 +64,7 @@ pub fn complex_cmd_config(command: clap::Command) -> clap::Command {
     #[cfg(not(any(windows)))]
     return command;
 }
-
+#[allow(unused_variables)]
 pub fn complex_parse_file_metadata_filters(matches: &clap::ArgMatches) -> Vec<Box<dyn FileMetadataFilter + Send>>{
     #[cfg(any(windows))]
     return cpfmf(matches);

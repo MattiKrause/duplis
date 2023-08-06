@@ -26,7 +26,7 @@ impl TypedValueParser for FileSizeValueParser {
             (0, [(0, b'0', b'9' + 1)].as_slice(), 10)
         };
 
-        let (fs_literal, rem) = parse_number_prefix(&value[off..], &ranges, radix).map_err(|err|format_int_err(err, cmd,  arg))?;
+        let (fs_literal, rem) = parse_number_prefix(&value[off..], ranges, radix).map_err(|err|format_int_err(err, cmd,  arg))?;
 
         macro_rules! supported_suffixes {
             ($pasuf: ident, $suffixes: ident, $($n: literal => $e: expr),*) => {
@@ -68,7 +68,7 @@ enum ParseIntError {
 }
 
 fn format_int_err(err: ParseIntError, cmd: &clap::Command, arg: Option<&Arg>) -> clap::Error {
-    let arg = arg.map(|arg| arg.to_string());
+    let arg = arg.map(std::string::ToString::to_string);
     let literal_style = cmd.get_styles().get_literal();
     let for_arg_txt = if let Some(arg) = &arg {
         format!(" for arg '{}{arg}{}'", literal_style.render(), literal_style.render_reset())
@@ -91,15 +91,15 @@ fn parse_number_prefix<'t>(text: &'t str, char_ranges: &'static [(u8,u8, u8)], r
 
     let remaining = 'char_loop: loop {
         let Some((char_i, char)) = chars.next() else { break ""; };
-        let charb = char.to_ascii_uppercase() as u8;
+        let char_byte = char.to_ascii_uppercase() as u8;
         if char == '_' {
             continue;
         }
         for (base, lower, upper) in char_ranges {
-            if charb >= *lower && charb < *upper {
+            if char_byte >= *lower && char_byte < *upper {
                 acc = acc
-                    .checked_mul(radix as u64)
-                    .and_then(|acc| acc.checked_add((*base + charb - *lower) as u64))
+                    .checked_mul(radix.into())
+                    .and_then(|acc| acc.checked_add((*base + char_byte - *lower).into()))
                     .ok_or(ParseIntError::Overflow)?;
                 continue 'char_loop;
             }

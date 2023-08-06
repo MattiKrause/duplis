@@ -40,7 +40,7 @@ impl log::Log for DuplisLogger {
         if self.disallowed_targets.iter().any(|dt| dt == metadata.target()) {
             return false;
         }
-        return true;
+        true
     }
 
     fn log(&self, record: &Record) {

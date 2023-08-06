@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::hash::{Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path};
-use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
+use crate::file_set_refiner::{CheckEqualsErrorOn, FileEqualsChecker, FileWorkload};
 use crate::os::{FileNameFilterArg, make_no_hidden, SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
 use crate::error_handling::AlreadyReportedError;
@@ -52,7 +52,7 @@ impl FileConsumeAction for ReplaceWithSymlinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
         let original = original.expect("original required");
         handle_file_op!(std::fs::remove_file(path), path, return Err(Recoverable::Recoverable(AlreadyReportedError)));
-        if let Err(err) = std::os::unix::fs::symlink(&original, path) {
+        if let Err(err) = std::os::unix::fs::symlink(original, path) {
             log::error!(target: crate::error_handling::ACTION_FATAL_FAILURE_TARGET, "FATAL ERROR: failed to create sym link to {} from {} due to error {err}", path.display(), original.display());
             // Something is absolutely not right here, continuing means risk of data loss
             return Err(Recoverable::Fatal(AlreadyReportedError));
@@ -78,9 +78,9 @@ impl FileConsumeAction for ReplaceWithSymlinkFileAction {
 struct PermissionEqualChecker;
 
 impl FileEqualsChecker for PermissionEqualChecker {
-    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsError> {
-        let metadata_a = handle_file_op!(a.metadata(), a, return Err(CheckEqualsError::first_err()));
-        let metadata_b= handle_file_op!(b.metadata(), b, return Err(CheckEqualsError::second_err()));
+    fn check_equal(&mut self, a: &Path, b: &Path) -> Result<bool, CheckEqualsErrorOn> {
+        let metadata_a = handle_file_op!(a.metadata(), a, return Err(CheckEqualsErrorOn::first_err()));
+        let metadata_b= handle_file_op!(b.metadata(), b, return Err(CheckEqualsErrorOn::second_err()));
         let perm_a = metadata_a.permissions().mode() & 0b111_111_111;
         let perm_b =metadata_b.permissions().mode() & 0b111_111_111;
         Ok(perm_a == perm_b)
@@ -93,8 +93,8 @@ impl FileEqualsChecker for PermissionEqualChecker {
         Ok(())
     }
 
-    fn work_severity(&self) -> FileWork {
-        FileWork::FileMetadataWork
+    fn work_severity(&self) -> FileWorkload {
+        FileWorkload::FileMetadata
     }
 }
 
@@ -102,7 +102,7 @@ impl FileEqualsChecker for PermissionEqualChecker {
 fn test_permission_equal_checker() {
     use std::fs::Permissions;
     use crate::common_tests::CommonPrefix;
-    use std::hash::BuildHasher;;
+    use std::hash::BuildHasher;
 
     let mut prefix = CommonPrefix::new("unix_permission_checker_");
     let file1 = prefix.make_file_auto();
@@ -119,7 +119,7 @@ fn test_permission_equal_checker() {
     let hash1 = hash1.finish();
     let mut hash2 = builder.build_hasher();
     equals_checker.hash_component(&path2, &mut hash2).unwrap();
-    let mut hash2 = hash2.finish();
+    let hash2 = hash2.finish();
     assert_ne!(hash1, hash2);
 
     let file1 = prefix.make_file_auto();
@@ -137,7 +137,7 @@ fn test_permission_equal_checker() {
     let hash1 = hash1.finish();
     let mut hash2 = builder.build_hasher();
     equals_checker.hash_component(&path2, &mut hash2).unwrap();
-    let mut hash2 = hash2.finish();
+    let hash2 = hash2.finish();
     assert_eq!(hash1, hash2);
 }
 

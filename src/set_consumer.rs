@@ -10,14 +10,14 @@ pub trait FileSetConsumer {
     fn consume_set(&mut self, set: Vec<HashedFile>) -> Result<(), AlreadyReportedError>;
 }
 
-/// execute given [FileConsumeAction] without user input
+/// execute given [`FileConsumeAction`] without user input
 pub struct UnconditionalAction {
     running_buf: PathBuf,
     original_buf: PathBuf,
     action: Box<dyn FileConsumeAction>,
 }
 
-/// execute given [FileConsumeAction] after asking user
+/// execute given [`FileConsumeAction`] after asking user
 pub struct InteractiveEachChoice<R, W> {
     running_buf: PathBuf,
     original_buf: PathBuf,
@@ -114,7 +114,7 @@ impl FileSetConsumer for UnconditionalAction {
                 report_file_missing!(&self.running_buf);
                 continue
             }
-            if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(&original_buf)) {
+            if let Err(Recoverable::Fatal(AlreadyReportedError {})) = self.action.consume(&self.running_buf, Some(original_buf)) {
                 log::error!(target: crate::error_handling::FILE_SET_ERR_TARGET,"aborting '{}' due to previous error", self.action.short_name());
                 return Err(AlreadyReportedError)
             };
