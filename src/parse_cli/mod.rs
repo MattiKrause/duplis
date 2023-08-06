@@ -8,8 +8,8 @@ use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use clap::{arg, Arg, ArgAction, ArgGroup, value_parser, ValueHint};
-use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, ValueParser};
+use clap::{arg, Arg, ArgAction, ArgGroup, Command, value_parser, ValueHint};
+use clap::builder::{OsStr, PossibleValue, PossibleValuesParser, TypedValueParser, ValueParser};
 use crate::error_handling::get_all_log_targets;
 
 use crate::file_action::{DeleteFileAction, FileConsumeAction, ReplaceWithHardLinkFileAction};
@@ -30,6 +30,7 @@ pub struct ExecutionPlan {
     pub num_threads: NonZeroU32,
     pub ignore_log_set: Vec<String>,
     pub input_sources: Vec<Box<dyn InputSource>>,
+    pub dedup_files: bool,
 }
 
 static ACTION_MODE_GROUP: &str = "action_mode";
@@ -48,7 +49,7 @@ fn assemble_command_info() -> clap::Command {
         .before_long_help("Find duplicate files. You can not only check based on content, but also other(potentially platform dependant) stuff like permissions.\n By default this program simply outputs equal files, in order to actually do something, you need to specify an action like delete")
         .arg(arg!(dirs: <DIRS> "The directories which should be searched for duplicates")
             .value_hint(ValueHint::DirPath)
-            .value_parser(value_parser!(std::path::PathBuf))
+            .value_parser(CanonicalPathValueParser)
             .action(ArgAction::Append)
             .required(false)
             .group(INPUT_SOURCE_GROUP)
@@ -146,15 +147,17 @@ fn assemble_command_info() -> clap::Command {
             .required(false)
             .group(EXT_LIST_GROUP)
         )
-        .arg(arg!(pathbl: --pathbl <PATHS> "files with these paths as prefix will not be processed")
+        .arg(arg!(pathbl: --pathbl <PATHS> "files with these paths as prefix will not be processed(symlinks are resolved)")
+            .value_hint(ValueHint::AnyPath)
             .value_delimiter(',')
             .action(ArgAction::Append)
-            .value_parser(value_parser!(std::path::PathBuf))
+            .value_parser(CanonicalPathValueParser)
             .required(false)
         )
         .arg(arg!(pathblfiles: --pathblloc <FILES>)
             .help("points to files which serve as blacklists for path prefixes(like pathbl)")
             .long_help("points to files which serve as blacklists for path prefixes(like pathbl), the files must contain a list of \\n separated utf-8  encoded paths")
+            .value_hint(ValueHint::FilePath)
             .action(ArgAction::Append)
             .value_parser(PathListFileParser)
             .value_delimiter(',')
@@ -207,7 +210,7 @@ impl clap::builder::TypedValueParser for PathListFileParser {
         let err_map = |err: std::io::Error| {
             let arg_text = arg.map_or(String::new(), |arg| {
                 let literal = cmd.get_styles().get_literal();
-                format!("'{}{arg}{}'", literal.render(), literal.render_reset())
+                format!("(for '{}{arg}{}')", literal.render(), literal.render_reset())
             });
             let err_style = cmd.get_styles().get_error();
             clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to open path file({arg_text}) {value:?}: {}{err}{}\n", err_style.render(), err_style.render_reset()))
@@ -215,20 +218,52 @@ impl clap::builder::TypedValueParser for PathListFileParser {
         };
         let file = std::fs::OpenOptions::new().read(true).open(value)
             .map_err(err_map)?;
-        let paths = std::io::BufReader::new(file)
+        let mut paths = std::io::BufReader::new(file)
             .lines()
             .filter(|s| s.as_ref().map_or(true, |s| !s.is_empty()))
             .map(|s| s.map(std::path::PathBuf::from))
             .collect::<Result<Vec<_>, _>>()
             .map_err(err_map)?;
+
+        for path in &mut paths {
+            *path = path.canonicalize().map_err(|err| {
+                let arg_text = arg.map_or(String::new(), |arg| {
+                    let literal = cmd.get_styles().get_literal();
+                    format!("(for '{}{arg}{}')", literal.render(), literal.render_reset())
+                });
+                let err_style = cmd.get_styles().get_error();
+                clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to canonicalize path {} from file {:?}({arg_text}) {value:?}: {}{err}{}\n", path.display(), value, err_style.render(), err_style.render_reset()))
+                    .with_cmd(cmd)
+            })?;
+        }
         Ok(paths)
+    }
+}
+
+#[derive(Clone)]
+pub struct CanonicalPathValueParser;
+
+impl TypedValueParser for CanonicalPathValueParser {
+    type Value = std::path::PathBuf;
+
+    fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &std::ffi::OsStr) -> Result<Self::Value, clap::Error> {
+        let value: &std::path::Path = value.as_ref();
+        value.canonicalize().map_err(|err| {
+            let arg_text = arg.map_or(String::new(), |arg| {
+                let literal = cmd.get_styles().get_literal();
+                format!("(for '{}{arg}{}')", literal.render(), literal.render_reset())
+            });
+            let err_style = cmd.get_styles().get_error();
+            clap::Error::raw(clap::error::ErrorKind::Io, format!("failed to canonicalize path {} ({arg_text}) {value:?}: {}{err}{}\n", value.display(), err_style.render(), err_style.render_reset()))
+                .with_cmd(cmd)
+        })
     }
 }
 
 fn parse_directories(matches: &clap::ArgMatches) -> Vec<Arc<LinkedPath>> {
     matches.get_many::<std::path::PathBuf>("dirs")
         .map(|paths| paths.map(|buf| buf.as_path()).map(LinkedPath::from_path_buf).collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![LinkedPath::root(".")])
+        .unwrap_or(Vec::new())
 }
 
 fn parse_set_order(matches: &clap::ArgMatches) -> Vec<Box<dyn SetOrder + Send>> {
@@ -468,6 +503,8 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
 
     let ignore_log_set = parse_ignore_log_targets(&matches);
 
+    let dedup_files = matches.get_flag("followsymlink");
+
     let plan = ExecutionPlan {
         file_equals,
         order_set: set_ordering,
@@ -475,6 +512,7 @@ pub fn parse() -> Result<ExecutionPlan, ()> {
         num_threads: NonZeroU32::new(num_threads).unwrap(),
         ignore_log_set,
         input_sources,
+        dedup_files,
     };
     Ok(plan)
 }

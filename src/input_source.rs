@@ -1,25 +1,59 @@
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::Arc;
+use dashmap::DashSet;
+use crate::dyn_clone_impl;
 use crate::error_handling::AlreadyReportedError;
 use crate::file_filters::FileFilter;
 use crate::util::{LinkedPath, push_to_path};
 
-pub struct InputSink(flume::Sender<LinkedPath>);
+#[derive(Clone)]
+pub struct ChannelInputSink(flume::Sender<LinkedPath>);
+pub struct DedupingInputSink(Arc<DashSet<LinkedPath>>, Box<dyn InputSink + Send>);
 
-impl InputSink {
+pub trait InputSink: InputSinkDynClone {
+    fn put(&mut self, path: LinkedPath);
+}
+
+dyn_clone_impl!(InputSinkDynClone, InputSink);
+
+pub trait InputSource {
+    fn consume_all(&mut self, sink: &mut dyn InputSink) -> Result<(), AlreadyReportedError>;
+}
+
+impl ChannelInputSink {
     pub fn new(sink: flume::Sender<LinkedPath>) -> Self {
         Self(sink)
     }
-    pub fn put(&mut self, path: LinkedPath) {
+}
+
+impl InputSink for ChannelInputSink {
+    fn put(&mut self, path: LinkedPath) {
         if let Err(path) = self.0.send(path) {
             log::warn!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "path sink closed! dropping path {}", path.0.to_push_buf().display())
         };
     }
 }
 
-pub trait InputSource {
-    fn consume_all(&mut self, sink: &mut InputSink) -> Result<(), AlreadyReportedError>;
+impl DedupingInputSink {
+    pub fn new(inherit: Box<dyn InputSink + Send>) -> Self {
+        Self(Arc::new(DashSet::new()), inherit)
+    }
+}
+
+impl InputSink for DedupingInputSink {
+    fn put(&mut self, path: LinkedPath) {
+        // is true if path was not in set before
+        if self.0.insert(path.clone())  {
+            self.1.put(path);
+        }
+    }
+}
+
+impl Clone for DedupingInputSink {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), self.1.dyn_clone())
+    }
 }
 
 pub struct DiscoveringInputSource {
@@ -31,7 +65,7 @@ pub struct DiscoveringInputSource {
 }
 
 pub struct StdInSource {
-    file_filters: FileFilter
+    file_filters: FileFilter,
 }
 
 macro_rules! handle_access_dir {
@@ -74,6 +108,18 @@ macro_rules! handle_follow_symlink {
     };
 }
 
+macro_rules! handle_canonicalize {
+    ($path: expr, $on_err: expr) => {{
+        match $path.canonicalize() {
+            Ok(p) => p,
+            Err(err) => {
+                log::trace!(target: crate::error_handling::DISCOVERY_ERR_TARGET, "failed to canonicalize path {}: {}", $path.display(), err);
+                $on_err
+            }
+        }
+    }};
+}
+
 impl DiscoveringInputSource {
     pub fn new(recurse: bool, follow_symlink: bool, sources: Vec<Arc<LinkedPath>>, file_filters: FileFilter) -> Self {
         Self {
@@ -84,21 +130,23 @@ impl DiscoveringInputSource {
             path_acc: Default::default(),
         }
     }
-    fn handle_symlink(&mut self, entry: std::fs::DirEntry, dir_path: &Arc<LinkedPath>, sink: &mut InputSink) {
+    fn handle_symlink(&mut self, entry: std::fs::DirEntry, dir_path: &Arc<LinkedPath>, sink: &mut dyn InputSink) {
         let entry_name = entry.file_name();
         let pop_token = push_to_path(&mut self.path_acc, &entry_name);
         let metadata = handle_follow_symlink!(std::fs::metadata(&pop_token.0), pop_token.0, return);
-        let entry_name = LinkedPath::new_child(&dir_path, entry_name);
+        let actual_path = handle_canonicalize!(pop_token.0, return);
+        let actual_lpath = LinkedPath::from_path_buf(&actual_path);
         if metadata.is_file() {
-            let keep_file = self.file_filters.keep_file_md(&entry_name, pop_token.0, &metadata);
+            let actual_lpath = Arc::into_inner(actual_lpath).unwrap();
+            let keep_file = self.file_filters.keep_file_md(&actual_lpath, &actual_path, &metadata);
             if keep_file {
-                sink.put(entry_name)
+                sink.put(actual_lpath)
             }
         } else if metadata.is_dir() && self.recurse {
-            self.sources.push(Arc::new(entry_name))
+            self.sources.push(actual_lpath)
         }
     }
-    fn consume_entry(&mut self, entry: std::fs::DirEntry, dir_path: &Arc<LinkedPath>, sink: &mut InputSink) {
+    fn consume_entry(&mut self, entry: std::fs::DirEntry, dir_path: &Arc<LinkedPath>, sink: &mut dyn InputSink) {
         let file_type = handle_get_file_type!(entry.file_type(), self.path_acc, entry.file_name(), return);
         if file_type.is_file() {
             let file_name = entry.file_name();
@@ -115,7 +163,7 @@ impl DiscoveringInputSource {
             self.handle_symlink(entry, dir_path, sink)
         }
     }
-    fn consume_one(&mut self, dir: Arc<LinkedPath>, sink: &mut InputSink) {
+    fn consume_one(&mut self, dir: Arc<LinkedPath>, sink: &mut dyn InputSink) {
         dir.write_full_to_buf(&mut self.path_acc);
         let current_dir = handle_access_dir!(std::fs::read_dir(&self.path_acc), self.path_acc, return);
         for entry in current_dir {
@@ -126,7 +174,7 @@ impl DiscoveringInputSource {
 }
 
 impl InputSource for DiscoveringInputSource {
-    fn consume_all(&mut self, sink: &mut InputSink) -> Result<(), AlreadyReportedError> {
+    fn consume_all(&mut self, sink: &mut dyn InputSink) -> Result<(), AlreadyReportedError> {
         while let Some(source) = self.sources.pop() {
             self.consume_one(source, sink)
         }
@@ -143,7 +191,7 @@ impl StdInSource {
 }
 
 impl InputSource for StdInSource {
-    fn consume_all(&mut self, sink: &mut InputSink) -> Result<(), AlreadyReportedError> {
+    fn consume_all(&mut self, sink: &mut dyn InputSink) -> Result<(), AlreadyReportedError> {
         let source = std::io::stdin().lock();
         for line in source.lines() {
             let line = line.map_err(|err| {

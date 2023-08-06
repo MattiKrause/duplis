@@ -99,7 +99,6 @@ pub struct ExtensionFilter {
     positive: bool,
 }
 
-//FIXME/TODO what happens to discovered symlinks, are they canonicalised, how should symlink filters be treated?
 #[derive(Clone)]
 pub struct PathFilter(Arc<PathFilterTree>);
 

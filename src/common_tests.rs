@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
 use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileNameFilter, MaxSizeFileFilter, MinSizeFileFilter, PathFilter};
 use crate::HashedFile;
-use crate::input_source::{DiscoveringInputSource, InputSink, InputSource};
+use crate::input_source::{ChannelInputSink, DiscoveringInputSource, InputSink, InputSource};
 use crate::set_consumer::{FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
 use crate::util::LinkedPath;
@@ -409,7 +409,7 @@ fn test_discovery_source() {
     fn test_input(expected: Vec<LinkedPath>, mut source: impl InputSource) {
         let (s, r) = flume::unbounded();
 
-        let mut sink = InputSink::new(s);
+        let mut sink = ChannelInputSink::new(s);
 
         source.consume_all(&mut sink).unwrap();
         drop(sink);

@@ -27,7 +27,7 @@ use dashmap::DashMap;
 use log::{LevelFilter};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_set_refiner::{FileSetRefiners};
-use crate::input_source::{InputSink};
+use crate::input_source::{ChannelInputSink, DedupingInputSink, InputSink};
 
 
 use crate::parse_cli::ExecutionPlan;
@@ -51,8 +51,6 @@ impl From<std::io::Error> for HashFileError {
     }
 }
 
-
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HashedFile {
     file_version_timestamp: Option<SystemTime>,
@@ -63,7 +61,7 @@ pub type BoxErr = Box<dyn std::error::Error>;
 
 fn main() {
     // the data required to run the program
-    let ExecutionPlan { file_equals, mut order_set, action: mut file_set_action, num_threads, ignore_log_set, input_sources } = parse_cli::parse().unwrap();
+    let ExecutionPlan { file_equals, mut order_set, action: mut file_set_action, num_threads, ignore_log_set, input_sources, dedup_files } = parse_cli::parse().unwrap();
 
     logger::DuplisLogger::init(ignore_log_set, LevelFilter::Trace, Box::new(stderr())).unwrap();
 
@@ -88,9 +86,12 @@ fn main() {
                 }
             }
         }
-        let mut input_sink = InputSink::new(files_send);
+        let mut input_sink: Box<dyn InputSink + Send> = Box::new(ChannelInputSink::new(files_send));
+        if dedup_files {
+            input_sink = Box::new(DedupingInputSink::new(input_sink));
+        }
         for mut source in input_sources {
-            let _ = source.consume_all(&mut input_sink);
+            let _ = source.consume_all(input_sink.as_mut());
         }
 
         drop(input_sink);
