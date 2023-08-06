@@ -3,10 +3,12 @@ use std::hash::{Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path};
 use crate::file_set_refiner::{CheckEqualsError, FileEqualsChecker, FileWork};
-use crate::os::{SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
+use crate::os::{FileNameFilterArg, make_no_hidden, SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
 use crate::{handle_file_op, Recoverable, report_file_action};
 use crate::error_handling::AlreadyReportedError;
 use crate::file_action::{FileConsumeAction, FileConsumeResult};
+use crate::file_filters::FileNameFilter;
+use crate::util::LinkedPath;
 
 pub fn get_set_order_options() -> Vec<SetOrderOption> {
     vec![]
@@ -15,7 +17,7 @@ pub fn get_set_order_options() -> Vec<SetOrderOption> {
 pub fn get_file_consume_action_simple() -> Vec<SimpleFileConsumeActionArg> {
     let rsymlink = SimpleFileConsumeActionArg {
         name: "resl",
-        short: 'L',
+        short: Some('L'),
         long: "resymlink",
         help: String::from("replace duplicate files with a symlink"),
         default: false,
@@ -27,7 +29,7 @@ pub fn get_file_consume_action_simple() -> Vec<SimpleFileConsumeActionArg> {
 pub fn get_file_equals_arg_simple() -> Vec<SimpleFileEqualCheckerArg> {
     let perm_eq = SimpleFileEqualCheckerArg {
         name: "perm_eq",
-        short: 'p',
+        short: Some('p'),
         long: "permeq",
         help: String::from("do not  consider files with different permissions different files"),
         default: true,
@@ -37,7 +39,14 @@ pub fn get_file_equals_arg_simple() -> Vec<SimpleFileEqualCheckerArg> {
     vec![perm_eq]
 }
 
-pub struct ReplaceWithSymlinkFileAction;
+pub fn get_file_name_filters() -> Vec<FileNameFilterArg> {
+    let hidden = make_no_hidden(|name, short, long, help,default|
+        FileNameFilterArg { name, short, long, help, default, action: Box::new(HiddenFileFilter), }
+    );
+    vec![hidden]
+}
+
+struct ReplaceWithSymlinkFileAction;
 
 impl FileConsumeAction for ReplaceWithSymlinkFileAction {
     fn consume(&mut self, path: &Path, original: Option<&Path>) -> FileConsumeResult {
@@ -131,5 +140,14 @@ fn test_permission_equal_checker() {
     equals_checker.hash_component(&path2, &mut hash2).unwrap();
     let mut hash2 = hash2.finish();
     assert_eq!(hash1, hash2);
+}
 
+#[derive(Clone)]
+struct HiddenFileFilter;
+
+impl FileNameFilter for HiddenFileFilter {
+    fn filter_file_name(&mut self, _name: &LinkedPath, name_path: &Path) -> Result<bool, ()> {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(name_path.iter().all(|name| !name.as_bytes().starts_with(&[b'.'])))
+    }
 }

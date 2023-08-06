@@ -1,5 +1,7 @@
 mod parse_file_size;
+mod parse_number;
 
+pub use parse_number::UNumberParser;
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -15,7 +17,7 @@ use crate::file_filters::{ExtensionFilter, FileFilter, FileMetadataFilter, FileN
 use crate::file_set_refiner::{FileContentEquals, FileEqualsChecker};
 use crate::input_source::{DiscoveringInputSource, InputSource, StdInSource};
 
-use crate::os::{SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
+use crate::os::{complex_cmd_config, complex_parse_file_metadata_filters, FileNameFilterArg, SetOrderOption, SimpleFileConsumeActionArg, SimpleFileEqualCheckerArg};
 use crate::parse_cli::parse_file_size::{FileSize, FileSizeValueParser};
 use crate::set_consumer::{DryRun, FileSetConsumer, InteractiveEachChoice, MachineReadableEach, MachineReadableSet, UnconditionalAction};
 use crate::set_order::{CreateTimeSetOrder, ModTimeSetOrder, NameAlphabeticSetOrder, NoopSetOrder, SetOrder};
@@ -158,6 +160,9 @@ fn assemble_command_info() -> clap::Command {
             .value_delimiter(',')
             .required(false)
         );
+    for (name, short, long, help, default, _) in get_file_name_filters() {
+        command = command.arg(Arg::new(name).short(short).long(long).help(help).action(if default { ArgAction::SetFalse } else { ArgAction::SetTrue }))
+    }
     for (name, short, long, help, default, _) in get_file_equals_args() {
         command = command.arg(Arg::new(name).short(short).long(long).help(help).action(if default { ArgAction::SetFalse } else { ArgAction::SetTrue}))
     }
@@ -185,6 +190,9 @@ fn assemble_command_info() -> clap::Command {
         .group(ArgGroup::new(ACTION_MODE_ACTION_GROUP).requires(FILE_ACTION_GROUP))
         .group(ArgGroup::new(FILE_ACTION_GROUP).requires(ACTION_MODE_ACTION_GROUP))
         .group(ArgGroup::new(DISCOVERY_CONFIG_GROUP).requires(DISCOVERING_SOURCE_GROUP).multiple(true));
+
+    let command = complex_cmd_config(command);
+
     command
 }
 
@@ -290,6 +298,14 @@ fn parse_file_filter(matches: &clap::ArgMatches) -> FileFilter {
     if let Some(filter) = matches.get_one::<FileSize>("minfsize") {
         metadata_filter.push(Box::new(MinSizeFileFilter::new(filter.0.saturating_sub(1))))
     }
+
+    let additional = get_file_name_filters().into_iter()
+        .filter(|(name, _, _, _, _, _)| matches.get_flag(name))
+        .map(|(_, _, _, _, _, action)| action);
+
+    metadata_filter.append(&mut complex_parse_file_metadata_filters(matches));
+
+    filename_filter.extend(additional);
     if matches.get_flag("nonzerof") {
         metadata_filter.push(Box::new(MinSizeFileFilter::new(0)))
     }
@@ -364,10 +380,10 @@ fn get_set_order_options() -> Vec<(&'static str, String, Box<dyn SetOrder>)> {
     default_order_options.chain(os_options).collect::<Vec<_>>()
 }
 
-fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, String, Box<dyn FileConsumeAction + Send>)> {
+fn get_file_consume_action_args() -> Vec<(&'static str, Option<char>, &'static str, String, Box<dyn FileConsumeAction + Send>)> {
     let mut default: Vec<(_, _, _, _, Box<dyn FileConsumeAction + Send>)> = vec![
-        ("isdel", 'd', "delete", String::from("Delete duplicated files"), Box::new(DeleteFileAction::default())),
-        ("rehl", 'l', "rehardlink", String::from("Replace duplicated files with a hard link"), Box::new(ReplaceWithHardLinkFileAction::default())),
+        ("isdel", Some('d'), "delete", String::from("Delete duplicated files"), Box::new(DeleteFileAction::default())),
+        ("rehl", Some('l'), "rehardlink", String::from("Replace duplicated files with a hard link"), Box::new(ReplaceWithHardLinkFileAction::default())),
     ];
     let os_specific = crate::os::get_file_consumer_simple()
         .into_iter()
@@ -376,13 +392,22 @@ fn get_file_consume_action_args() -> Vec<(&'static str, char, &'static str, Stri
     default
 }
 
-fn get_file_equals_args() -> Vec<(&'static str, char, &'static str, String, bool, Box<dyn FileEqualsChecker + Send>)> {
+fn get_file_equals_args() -> Vec<(&'static str, Option<char>, &'static str, String, bool, Box<dyn FileEqualsChecker + Send>)> {
     let mut default: Vec<(_, _, _, _, _, Box<dyn FileEqualsChecker + Send>)> = vec![
-        ("contenteq", 'c', "nocontenteq", String::from("do not compare files byte-by-byte(only by hash)"), true, Box::new(FileContentEquals::default()))
+        ("contenteq", Some('c'), "nocontenteq", String::from("do not compare files byte-by-byte(only by hash)"), true, Box::new(FileContentEquals::default()))
     ];
     let os_specific = crate::os::get_file_equals_simple()
         .into_iter()
         .map(|SimpleFileEqualCheckerArg { name, short, long, help, default, action }| (name, short, long, help, default, action));
+    default.extend(os_specific);
+    default
+}
+
+fn get_file_name_filters() -> Vec<(&'static str, Option<char>, &'static str, String, bool, Box<dyn FileNameFilter + Send>)> {
+    let mut default = Vec::new();
+    let os_specific = crate::os::get_file_name_filters()
+        .into_iter()
+        .map(|FileNameFilterArg { name, short, long, help, default, action }| (name, short, long, help, default,action));
     default.extend(os_specific);
     default
 }
